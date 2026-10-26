@@ -1,13 +1,15 @@
 flowchart TB
-  Browser[User Browser] --> UI[React Vite frontend :3000]
-  UI -->|HTTP / API key if configured| API[FastAPI :8000]
-  API --> DB[(PostgreSQL Docker volume)]
-  API -.-> ML[Optional LaBSE model cache]
-  API -.-> Groq[Optional Groq API]
-  subgraph Compose[Docker Compose trusted host]
-    UI
+  Internet["Browser HTTPS"] --> Proxy["TLS reverse proxy / hosting edge"]
+  Proxy --> Web["Nginx :8080 / React static app"]
+  Web -->|/api/*| API["FastAPI container :8000"]
+  API --> DB[("PostgreSQL 16 persistent volume")]
+  API -.-> HostedAI["Optional Groq AI"]
+  API -.-> Semantic["Optional LaBSE embeddings"]
+  DB --> Dump["pg_dump backup script"]
+  Dump --> Offsite["Operator-managed encrypted off-site backup"]
+  subgraph Host["Single-host Docker Compose"]
+    Web
     API
     DB
   end
-  GH[GitHub Actions CI] --> Tests[Pytest / ESLint / Build / Compose validation]
-  note[Public hosting requires HTTPS, auth and backup] -.-> Compose
+  Actions["GitHub Actions"] --> Test["Pytest + ESLint + builds + Compose checks"]

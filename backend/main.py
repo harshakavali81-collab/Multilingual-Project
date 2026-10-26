@@ -131,6 +131,10 @@ class NewUser(Credentials):
     role: str = Field(default="member")
 
 
+class AdminPasswordReset(BaseModel):
+    new_password: str = Field(min_length=12, max_length=128)
+
+
 class PasswordChange(BaseModel):
     current_password: str = Field(min_length=1)
     new_password: str = Field(min_length=12, max_length=128)
@@ -566,6 +570,22 @@ def create_user(payload: NewUser, request: Request, db: Session = Depends(get_db
     db.commit()
     db.refresh(user)
     return _public_user(user)
+
+
+@app.post("/admin/users/{user_id}/reset-password")
+def reset_account_password(
+    user_id: int, payload: AdminPasswordReset, request: Request, db: Session = Depends(get_db)
+) -> dict:
+    _require_admin(request)
+    user = db.get(AuthUser, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    user.password_hash = _hasher.hash(payload.new_password)
+    user.failed_logins = 0
+    user.locked_until = None
+    _revoke_user_sessions(db, user.id)
+    db.commit()
+    return {"message": "Password reset; all user sessions were revoked."}
 
 
 @app.get("/")

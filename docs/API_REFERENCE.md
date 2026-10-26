@@ -36,3 +36,13 @@ Validation errors return HTTP 422. Unsupported file types return 415, oversized 
 - GET /analytics?days=14 — day-by-day document uploads and questions (1..90 days), language/category distributions and answer modes.
 - POST /upload-file also accepts CSV and DOCX documents. Text extraction is capped by MAX_DOCUMENT_CHARS (default 200,000); PDF parsing is capped at 250 pages. No OCR for scanned images.
 - Set optional APP_API_KEY on the backend to protect data routes; send X-API-Key on API requests. The /health, /docs and OpenAPI spec endpoints remain public. The default local demo does not require a key.
+
+## Multi-user authentication (production stack)
+- `GET /auth/status` public indication whether sign-in is required.
+- `POST /auth/login`: `{email, password}` yields an opaque 8-hour bearer token, token type and user profile. Failed login attempts cause account lockout.
+- `GET /auth/me` retrieves the current signed-in user.
+- `POST /auth/logout` revokes the current bearer token.
+- `POST /auth/change-password`: current_password, new_password; revokes all sessions.
+- `GET /admin/users`, `POST /admin/users`: admin-only account listing and creation with email, password and member/admin role.
+- `POST /admin/users/{user_id}/reset-password`: admin-only new_password, revokes target account sessions.
+All nonpublic routes require `Authorization: Bearer <token>` when AUTH_REQUIRED=true. Every document, history, search and analytics operation is isolated by account. Existing records without owner assignments are not returned in authenticated mode. No password hashes are returned to clients.

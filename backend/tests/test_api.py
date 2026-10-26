@@ -187,3 +187,50 @@ def test_login_lockout(client, monkeypatch):
     for _ in range(5):
         assert client.post("/auth/login", json={"email": "locked@example.test", "password": "wrong"}).status_code == 401
     assert client.post("/auth/login", json={"email": "locked@example.test", "password": "secret-long-password"}).status_code == 429
+
+
+
+def test_admin_password_reset_revokes_existing_member_sessions(client, monkeypatch):
+    import main
+
+    with main.SessionLocal() as db:
+        db.add(main.AuthUser(email="admin@test.local", password_hash=main._hasher.hash("admin-secret-superlong"), role="admin"))
+        db.add(main.AuthUser(email="member@test.local", password_hash=main._hasher.hash("member-secret-superlong"), role="member"))
+        db.commit()
+
+    monkeypatch.setenv("AUTH_REQUIRED", "true")
+    admin_token = client.post("/auth/login", json={"email": "admin@test.local", "password": "admin-secret-superlong"}).json()["access_token"]
+    member_login = client.post("/auth/login", json={"email": "member@test.local", "password": "member-secret-superlong"})
+    member_token = member_login.json()["access_token"]
+    member_id = member_login.json()["user"]["id"]
+    admin_header = {"Authorization": "Bearer " + admin_token}
+    member_header = {"Authorization": "Bearer " + member_token}
+    assert client.post(
+        f"/admin/users/{member_id}/reset-password", headers=member_header,
+        json={"new_password": "new-member-superlong"}
+    ).status_code == 403
+    reset = client.post(
+        f"/admin/users/{member_id}/reset-password", headers=admin_header,
+        json={"new_password": "new-member-superlong"}
+    )
+    assert reset.status_code == 200
+    assert client.get("/auth/me", headers=member_header).status_code == 401
+    assert client.post("/auth/login", json={"email": "member@test.local", "password": "new-member-superlong"}).status_code == 200
+
+
+def test_migration_uses_nullable_owner_without_assigning_legacy_data(tmp_path, monkeypatch):
+    import main
+    from sqlalchemy import create_engine, inspect, text
+
+    legacy = create_engine("sqlite:///" + str(tmp_path / "legacy.db"))
+    with legacy.begin() as conn:
+        conn.execute(text("CREATE TABLE documents (id INTEGER PRIMARY KEY, title VARCHAR(255), content TEXT, language VARCHAR(20), category VARCHAR(100), created_at DATETIME)"))
+        conn.execute(text("CREATE TABLE chat_history (id INTEGER PRIMARY KEY, question TEXT, answer TEXT, language VARCHAR(20), sources_json TEXT, answer_mode VARCHAR(30), created_at DATETIME)"))
+        conn.execute(text("INSERT INTO documents (id, title, content, language) VALUES (1, 'old', 'legacy private data', 'English')"))
+    monkeypatch.setattr(main, "engine", legacy)
+    main.migrate_schema()
+    main.migrate_schema()
+    assert "owner_id" in [col["name"] for col in inspect(legacy).get_columns("documents")]
+    with legacy.connect() as conn:
+        assert conn.execute(text("SELECT owner_id FROM documents WHERE id=1")).scalar() is None
+    legacy.dispose()

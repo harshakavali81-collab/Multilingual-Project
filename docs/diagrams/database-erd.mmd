@@ -1,6 +1,25 @@
 erDiagram
+  AUTH_USERS ||--o{ DOCUMENTS : owns
+  AUTH_USERS ||--o{ CHAT_HISTORY : owns
+  AUTH_USERS ||--o{ LOGIN_SESSIONS : authenticates
+  AUTH_USERS {
+    integer id PK
+    varchar email UK
+    text password_hash
+    varchar role
+    integer failed_logins
+    datetime locked_until
+    datetime created_at
+  }
+  LOGIN_SESSIONS {
+    integer id PK
+    integer user_id FK
+    varchar token_hash UK
+    datetime expires_at
+  }
   DOCUMENTS {
     integer id PK
+    integer owner_id FK
     varchar title
     text content
     varchar language
@@ -9,6 +28,7 @@ erDiagram
   }
   CHAT_HISTORY {
     integer id PK
+    integer owner_id FK
     text question
     text answer
     varchar language
@@ -16,4 +36,3 @@ erDiagram
     varchar answer_mode
     datetime created_at
   }
-  DOCUMENTS ||--o{ CHAT_HISTORY : "cited in source metadata (logical)"
