@@ -6,16 +6,18 @@ local hashing-vectorizer fallback keeps development, tests, and offline demos us
 from __future__ import annotations
 
 import hashlib
+import secrets
 import json
 import math
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Generator, Optional
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -68,6 +70,7 @@ Base.metadata.create_all(bind=engine)
 SUPPORTED_LANGUAGES = {"en": "English", "hi": "Hindi", "te": "Telugu", "ta": "Tamil", "kn": "Kannada"}
 LANGUAGE_CODES = {name.lower(): code for code, name in SUPPORTED_LANGUAGES.items()}
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", "10485760"))
+MAX_DOCUMENT_CHARS = int(os.getenv("MAX_DOCUMENT_CHARS", "200000"))
 EMBEDDING_DIMENSION = 384
 _DOCUMENT_EMBEDDINGS: dict[int, list[float]] = {}
 _encoder = None
@@ -92,6 +95,18 @@ app = FastAPI(
     description="Grounded document retrieval across English, Hindi, Telugu, Tamil, and Kannada. GROQ_API_KEY is optional.",
     version="1.0.0",
 )
+@app.middleware("http")
+async def optional_api_key(request: Request, call_next):
+    """Require a shared key for data routes only when explicitly configured."""
+    expected = os.getenv("APP_API_KEY", "").strip()
+    public_paths = {"/", "/docs", "/openapi.json", "/redoc", "/health"}
+    if expected and request.url.path not in public_paths and request.method != "OPTIONS":
+        supplied = request.headers.get("x-api-key", "")
+        if not secrets.compare_digest(supplied, expected):
+            return JSONResponse(status_code=401, content={"detail": "Valid X-API-Key header required."})
+    return await call_next(request)
+
+
 _allowed_origins = [
     item.strip()
     for item in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000").split(",")
@@ -197,8 +212,8 @@ def _language_name(preferred: str, query: str) -> str:
 
 def _parse_document_file(filename: str, raw: bytes) -> str:
     suffix = Path(filename).suffix.lower()
-    if suffix not in {".txt", ".md", ".pdf"}:
-        raise HTTPException(status_code=415, detail="Unsupported file type. Upload a .txt, .md, or text-based .pdf file.")
+    if suffix not in {".txt", ".md", ".csv", ".pdf", ".docx"}:
+        raise HTTPException(status_code=415, detail="Unsupported file type. Upload TXT, MD, CSV, PDF, or DOCX.")
     if len(raw) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MiB limit.")
     if not raw:
@@ -208,23 +223,49 @@ def _parse_document_file(filename: str, raw: bytes) -> str:
             from io import BytesIO
             from pypdf import PdfReader
             reader = PdfReader(BytesIO(raw))
+            if len(reader.pages) > 250:
+                raise HTTPException(status_code=413, detail="PDF exceeds the 250-page limit.")
             text = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=422, detail="Could not read this PDF. Upload a valid text-based PDF.") from exc
         if not text:
             raise HTTPException(status_code=422, detail="No selectable text found. Scanned PDFs need OCR first.")
-        return text
+        return _validated_content(text)
+    if suffix == ".docx":
+        try:
+            from io import BytesIO
+            from docx import Document
+            document = Document(BytesIO(raw))
+            paragraphs = [paragraph.text for paragraph in document.paragraphs]
+            for table in document.tables:
+                for row in table.rows:
+                    paragraphs.append(" | ".join(cell.text for cell in row.cells))
+            return _validated_content("\n".join(paragraphs))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail="Could not read this DOCX document.") from exc
     try:
-        return raw.decode("utf-8-sig").strip()
+        return _validated_content(raw.decode("utf-8-sig"))
     except UnicodeDecodeError as exc:
         raise HTTPException(status_code=422, detail="Text files must be encoded as UTF-8.") from exc
 
 
+def _validated_content(value: str) -> str:
+    """Reject empty or excessively large extracted text."""
+    clean = value.strip()
+    if not clean:
+        raise HTTPException(status_code=422, detail="Document content cannot be empty.")
+    if len(clean) > MAX_DOCUMENT_CHARS:
+        raise HTTPException(status_code=413, detail="Extracted text exceeds the document character limit.")
+    return clean
+
+
 def _save_document(db: Session, title: str, content: str, category: str = "General") -> DBDocument:
     clean_title = (title or "Untitled document").strip()[:255] or "Untitled document"
-    clean_content = (content or "").strip()
-    if not clean_content:
-        raise HTTPException(status_code=422, detail="Document content cannot be empty.")
+    clean_content = _validated_content(content or "")
     document = DBDocument(
         title=clean_title,
         content=clean_content,
@@ -418,6 +459,65 @@ def clear_history(db: Session = Depends(get_db)) -> dict:
     deleted = db.query(ChatHistory).delete(synchronize_session=False)
     db.commit()
     return {"message": "Chat history cleared.", "deleted_count": deleted}
+
+
+@app.get("/search")
+def search_documents(
+    q: str = Query(min_length=1, max_length=4000),
+    limit: int = Query(default=10, ge=1, le=50),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Search document metadata and text without exposing entire documents."""
+    query = q.strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="Search query cannot be empty.")
+    vector = embed_text(query)
+    rows = db.query(DBDocument).all()
+    ranked = sorted(
+        ((_cosine_similarity(vector, _document_embedding(item)), item) for item in rows),
+        key=lambda pair: pair[0], reverse=True,
+    )
+    matches = [
+        {
+            "id": item.id,
+            "title": item.title,
+            "language": item.language,
+            "category": item.category,
+            "score": round(max(0.0, score), 4),
+            "preview": item.content[:220],
+        }
+        for score, item in ranked if score > 0
+    ]
+    return {"query": query, "total": len(matches), "results": matches[:limit]}
+
+
+@app.get("/analytics")
+def get_analytics(days: int = Query(default=14, ge=1, le=90), db: Session = Depends(get_db)) -> dict:
+    """Return real document/question activity for a chart-ready dashboard."""
+    now = datetime.now(timezone.utc).date()
+    cutoff = datetime.combine(now - timedelta(days=days - 1), datetime.min.time())
+    document_rows = db.query(func.date(DBDocument.created_at), func.count(DBDocument.id)).filter(
+        DBDocument.created_at >= cutoff
+    ).group_by(func.date(DBDocument.created_at)).all()
+    question_rows = db.query(func.date(ChatHistory.created_at), func.count(ChatHistory.id)).filter(
+        ChatHistory.created_at >= cutoff
+    ).group_by(func.date(ChatHistory.created_at)).all()
+    doc_map = {str(day): count for day, count in document_rows}
+    question_map = {str(day): count for day, count in question_rows}
+    daily = []
+    for offset in range(days - 1, -1, -1):
+        day = (now - timedelta(days=offset)).isoformat()
+        daily.append({"date": day, "documents": doc_map.get(day, 0), "questions": question_map.get(day, 0)})
+    categories = db.query(DBDocument.category, func.count(DBDocument.id)).group_by(DBDocument.category).all()
+    modes = db.query(ChatHistory.answer_mode, func.count(ChatHistory.id)).group_by(ChatHistory.answer_mode).all()
+    languages = db.query(DBDocument.language, func.count(DBDocument.id)).group_by(DBDocument.language).all()
+    return {
+        "days": days,
+        "daily": daily,
+        "language_counts": {lang: count for lang, count in languages},
+        "category_counts": {category or "General": count for category, count in categories},
+        "answer_modes": {mode: count for mode, count in modes},
+    }
 
 
 @app.get("/stats")
