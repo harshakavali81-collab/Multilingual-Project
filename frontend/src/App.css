@@ -119,3 +119,24 @@ textarea::placeholder, input::placeholder { color: #a0a0b2; }
 .library-filter{margin-bottom:13px}
 @media(max-width:980px){.analytics-grid{grid-template-columns:1fr 1fr}.analytics-chart:last-child{grid-column:1/-1}.api-key-control label{display:none}}
 @media(max-width:720px){.analytics-grid{grid-template-columns:1fr}.analytics-chart:last-child{grid-column:auto}.api-key-control{gap:4px;margin:0 8px}.api-key-control input{width:103px}.api-key-control button{padding:7px}}
+
+.auth-shell{display:grid;place-items:center;min-height:100svh;padding:30px}
+.auth-card{width:min(100%,440px);padding:35px}
+.auth-symbol{display:grid;place-items:center;width:50px;height:50px;background:#edeafb;color:#5844cc;border-radius:15px;font-size:27px;font-weight:800;margin-bottom:20px}
+.auth-card h1{font-size:28px;letter-spacing:-1.2px;margin:8px 0}
+.auth-subtitle,.auth-hint{font-size:12px;line-height:1.7;color:#89859a}
+.auth-error{background:#fff0f1;border:1px solid #ffd8dd;border-radius:10px;padding:12px;color:#a12546;font-size:12px;margin-top:15px}
+.auth-form,.account-form{display:grid;gap:9px;margin-top:22px}
+.auth-form label,.account-form label{font-size:11px;font-weight:700;color:#5a5674}
+.auth-form input,.account-form input,.account-form select{font-size:13px;padding:12px}
+.auth-form button,.account-form button{margin-top:9px}
+.auth-hint{margin-top:22px}
+.signed-user{display:flex;align-items:center;gap:9px;min-width:0;margin-left:auto;margin-right:14px}
+.signed-user span{font-size:11px;color:#595469;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.signed-user button{color:#614cbf;background:#efecff;border:1px solid #dfd9ff;border-radius:9px;padding:8px;font-weight:700;font-size:11px;cursor:pointer;white-space:nowrap}
+.account-panel{padding:25px;margin-top:22px}
+.account-form{max-width:430px;padding:19px;background:#fcfbff;border:1px solid #ece8fa;border-radius:13px}
+.account-form h3{font-size:14px;margin:0 0 6px}
+.account-form p{font-size:11px;color:#89859a;line-height:1.6}
+.account-notice{color:#4d4b83;font-size:12px;padding:12px;background:#f2efff;border-radius:8px;margin-top:16px}
+@media(max-width:720px){.signed-user span{display:none}.signed-user{margin-right:5px}.account-panel{padding:18px}}

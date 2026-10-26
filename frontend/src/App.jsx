@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import "./App.css";
+import AuthLogin from "./AuthLogin.jsx";
+import AccountSecurity from "./AccountSecurity.jsx";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
 const LANGUAGES = [
@@ -17,6 +19,8 @@ async function apiRequest(path, options = {}) {
     const headers = new Headers(options.headers || {});
     const apiKey = window.sessionStorage.getItem("kb-api-key");
     if (apiKey) headers.set("X-API-Key", apiKey);
+    const token = window.sessionStorage.getItem("kb-access-token");
+    if (token) headers.set("Authorization", "Bearer " + token);
     response = await fetch(API_BASE + path, { ...options, headers });
   } catch {
     throw new Error("Could not connect to the API at " + API_BASE + ". Start the backend and check VITE_API_BASE_URL.");
@@ -50,6 +54,8 @@ function App() {
   const [articleCategory, setArticleCategory] = useState("General");
   const [articleContent, setArticleContent] = useState("");
   const [selectedFile, setSelectedFile] = useState(null);
+  const [authRequired, setAuthRequired] = useState(null);
+  const [sessionUser, setSessionUser] = useState(null);
   const [searchText, setSearchText] = useState("");
   const [apiKey, setApiKey] = useState(() => window.sessionStorage.getItem("kb-api-key") || "");
   const [analytics, setAnalytics] = useState({ daily: [], language_counts: {}, category_counts: {}, answer_modes: {} });
@@ -93,10 +99,53 @@ function App() {
   }, []);
 
   useEffect(() => {
-    // This async request synchronizes initial UI state with the external API.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void refreshDashboard();
+    const initialize = async () => {
+      try {
+        const statusData = await apiRequest("/auth/status");
+        setAuthRequired(statusData.required);
+        if (statusData.required) {
+          if (!window.sessionStorage.getItem("kb-access-token")) {
+            setStatus("signed-out");
+            return;
+          }
+          try {
+            setSessionUser(await apiRequest("/auth/me"));
+          } catch {
+            window.sessionStorage.removeItem("kb-access-token");
+            setSessionUser(null);
+            setStatus("signed-out");
+            return;
+          }
+        }
+        await refreshDashboard();
+      } catch (requestError) {
+        setError(requestError.message || "Could not connect.");
+        setStatus("offline");
+      }
+    };
+    void initialize();
   }, [refreshDashboard]);
+
+  const signIn = async ({ email, password }) => {
+    const result = await apiRequest("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    window.sessionStorage.setItem("kb-access-token", result.access_token);
+    setSessionUser(result.user);
+    await refreshDashboard();
+  };
+
+  const signOut = async () => {
+    try { await apiRequest("/auth/logout", { method: "POST" }); } catch { /* discard local session */ }
+    window.sessionStorage.removeItem("kb-access-token");
+    setSessionUser(null);
+    setDocuments([]);
+    setHistory([]);
+    setAnswer(null);
+    setStatus("signed-out");
+  };
 
   const askQuestion = async (event) => {
     event.preventDefault();
@@ -203,6 +252,13 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
+  if (authRequired === null) return <main className="app-shell auth-shell">
+    <section className="panel auth-card" role="status">
+      <h1>Connecting to Bhasha…</h1>{error && <p role="alert">{error}</p>}
+    </section></main>;
+
+  if (authRequired && !sessionUser) return <AuthLogin signIn={signIn} />;
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -210,7 +266,7 @@ function App() {
           <span className="brand-mark" aria-hidden="true">भ</span>
           <span><strong>Bhasha</strong><small>Knowledge Hub</small></span>
         </a>
-        <div className="api-key-control">
+        {!authRequired && <div className="api-key-control">
           <label htmlFor="private-key">Private API key (optional)</label>
           <input id="private-key" type="password" autoComplete="off" value={apiKey}
             onChange={(event) => {
@@ -219,7 +275,10 @@ function App() {
               else window.sessionStorage.removeItem("kb-api-key");
             }} placeholder="Only if protected" />
           <button type="button" onClick={() => { void refreshDashboard(); }}>Connect</button>
-        </div>
+        </div>}
+        {authRequired && sessionUser && <div className="signed-user">
+          <span>{sessionUser.email}</span><button type="button" onClick={() => { void signOut(); }}>Sign out</button>
+        </div>}
         <div className={"connection-state " + status} role="status">
           <span className="status-dot" />
           {status === "online" ? "API connected" : status === "checking" ? "Connecting…" : "API offline"}
@@ -340,6 +399,8 @@ function App() {
         <div className="history-heading"><div className="panel-heading"><span className="panel-icon violet">◷</span><div><h2>Recent conversations</h2><p>Questions and answers are stored by the backend.</p></div></div><div className="history-actions"><button type="button" className="secondary-button" onClick={exportHistory} disabled={!history.length}>Export JSON ↓</button><button type="button" className="text-button" onClick={clearHistory} disabled={!history.length}>Clear history</button></div></div>
         {!history.length ? <div className="empty-history"><span>◷</span><p>Your recent questions will appear here.</p></div> : <div className="history-list">{history.map((item) => <article className="history-item" key={item.id}><div className="history-meta"><span>{item.language || "English"}</span><time>{formatDate(item.created_at)}</time></div><h3>{item.question}</h3><p>{item.answer}</p>{item.sources?.length > 0 && <small className="history-sources">Sources: {item.sources.map((source) => source.title).join(", ")}</small>}</article>)}</div>}
       </section>
+
+      {authRequired && sessionUser && <AccountSecurity user={sessionUser} apiRequest={apiRequest} onPasswordChanged={signOut} />}
 
       <footer className="footer"><a className="footer-brand" href="#home">Bhasha Knowledge Hub</a><p>Multilingual Indian Language Knowledge Base Platform · Built with React, FastAPI and SQLAlchemy</p><a href={API_BASE + "/docs"} target="_blank" rel="noreferrer">API documentation ↗</a></footer>
     </main>
