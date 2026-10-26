@@ -1,58 +1,56 @@
-version: '3.8'
-
 services:
   db:
-    image: postgres:15-alpine
-    container_name: multilingual-kb-db
+    image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change-this-local-password}
       POSTGRES_DB: ${DB_NAME:-multilingual_kb}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-multilingual_kb}"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 8
+    ports:
+      - "127.0.0.1:5432:5432"
 
   backend:
     build:
       context: ./backend
-      dockerfile: Dockerfile
-    container_name: multilingual-kb-backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://${DB_USER:-postgres}:${DB_PASSWORD:-change-this-local-password}@db:5432/${DB_NAME:-multilingual_kb}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-auto}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/LaBSE}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
+      PYTHONUNBUFFERED: "1"
     ports:
       - "8000:8000"
-    environment:
-      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@db:5432/${DB_NAME:-multilingual_kb}
-      PYTHONUNBUFFERED: 1
     depends_on:
       db:
         condition: service_healthy
-    volumes:
-      - ./backend:/app
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+    restart: unless-stopped
 
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
-    container_name: multilingual-kb-frontend
-    ports:
-      - "3000:3000"
     environment:
-      REACT_APP_API_URL: http://localhost:8000
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "3000:5173"
     depends_on:
-      - backend
-    volumes:
-      - ./frontend/src:/app/src
-      - ./frontend/public:/app/public
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   postgres_data:
-
-networks:
-  default:
-    name: multilingual-kb-network

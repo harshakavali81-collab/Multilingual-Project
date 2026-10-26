@@ -1,355 +1,433 @@
-import os
+"""API for the Multilingual Indian Language Knowledge Base Platform.
+
+The app prefers LaBSE when the optional ML dependencies are installed. A small,
+local hashing-vectorizer fallback keeps development, tests, and offline demos usable.
+"""
+from __future__ import annotations
+
 import hashlib
-import numpy as np
-from pypdf import PdfReader
-from fastapi import FastAPI, Depends, HTTPException, Form, UploadFile, File
+import json
+import math
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Generator, Optional
+
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
-from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
-from groq import Groq
-from langdetect import detect
-import datetime
+from pydantic import BaseModel, Field
+from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine, func
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-# --- SYSTEM CONFIGURATION ---
-# Switching from PostgreSQL to a local SQLite database file for native running
-DATABASE_URL = "sqlite:///./local_kb.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-# Initialize AI Core Engineering Models
-# LaBSE handles cross-lingual vector spaces (mapping Hindi/Telugu/Tamil/English together)
-print("Loading Multilingual LaBSE Embedding Model... (This may take a moment on first launch)")
-encoder = SentenceTransformer('sentence-transformers/LabSE')
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./local_kb.db")
+_engine_options: dict = {"pool_pre_ping": True}
+if DATABASE_URL.startswith("sqlite"):
+    _engine_options["connect_args"] = {"check_same_thread": False}
+engine = create_engine(DATABASE_URL, **_engine_options)
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
-# Read Groq API Key directly from environment setup
-from dotenv import load_dotenv
 
-load_dotenv()
+def _utcnow_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-print("Groq Key Loaded:", bool(GROQ_API_KEY))
+class Base(DeclarativeBase):
+    pass
 
-if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY not found")
 
-groq_client = Groq(api_key=GROQ_API_KEY)
-
-app = FastAPI(title="Multilingual Indian Language Knowledge Base Platform")
-
-# CORS Setup for React frontend communication
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# --- IN-MEMORY LOCAL VECTOR STORAGE (QDRANT FALLBACK) ---
-# Stores { document_id: embedding_vector_list } for semantic cross-lingual matching
-LOCAL_VECTOR_INDEX = {}
-
-# --- DATABASE SCHEMAS (SQLite Persistent Storage) ---
 class DBDocument(Base):
     __tablename__ = "documents"
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String(255), nullable=False)
     content = Column(Text, nullable=False)
-    language = Column(String(20), nullable=False)
-    category = Column(String(50), nullable=True)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    language = Column(String(20), nullable=False, default="English")
+    category = Column(String(100), nullable=True, default="General")
+    created_at = Column(DateTime, nullable=False, default=_utcnow_naive)
 
-# Automatically generate local SQLite database tables if missing
+
+class ChatHistory(Base):
+    __tablename__ = "chat_history"
+    id = Column(Integer, primary_key=True, index=True)
+    question = Column(Text, nullable=False)
+    answer = Column(Text, nullable=False)
+    language = Column(String(20), nullable=False, default="English")
+    sources_json = Column(Text, nullable=False, default="[]")
+    answer_mode = Column(String(30), nullable=False, default="extractive-fallback")
+    created_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+
+
 Base.metadata.create_all(bind=engine)
 
-def get_db():
+SUPPORTED_LANGUAGES = {"en": "English", "hi": "Hindi", "te": "Telugu", "ta": "Tamil", "kn": "Kannada"}
+LANGUAGE_CODES = {name.lower(): code for code, name in SUPPORTED_LANGUAGES.items()}
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", "10485760"))
+EMBEDDING_DIMENSION = 384
+_DOCUMENT_EMBEDDINGS: dict[int, list[float]] = {}
+_encoder = None
+_encoder_attempted = False
+
+
+class QueryRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=4000)
+    preferred_language: str = Field(default="auto", max_length=30)
+    top_k: int = Field(default=3, ge=1, le=10)
+
+
+class UploadResponse(BaseModel):
+    message: str
+    document_id: int
+    title: str
+    detected_language: str
+
+
+app = FastAPI(
+    title="Multilingual Indian Language Knowledge Base Platform",
+    description="Grounded document retrieval across English, Hindi, Telugu, Tamil, and Kannada. GROQ_API_KEY is optional.",
+    version="1.0.0",
+)
+_allowed_origins = [
+    item.strip()
+    for item in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000").split(",")
+    if item.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
+
+
+def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
-class QueryRequest(BaseModel):
-    query: str
-    preferred_language: str
 
-# --- TRANSLATION LAYER (LOCAL CACHE & ACCELERATION) ---
-LOCAL_TRANSLATION_CACHE = {}
-
-def translate_fallback(text: str, target_lang: str) -> str:
-    """
-    Acts as a translation layer preprocessing placeholder.
-    In full production mode, this routes to your independent IndicTrans2 microservice.
-    """
-    cache_key = f"{hashlib.md5(text.encode('utf-8')).hexdigest()}:{target_lang}"
-    if cache_key in LOCAL_TRANSLATION_CACHE:
-        return LOCAL_TRANSLATION_CACHE[cache_key]
-
+def detect_language(text: str) -> str:
+    for char in text:
+        codepoint = ord(char)
+        if 0x0C00 <= codepoint <= 0x0C7F:
+            return "te"
+        if 0x0B80 <= codepoint <= 0x0BFF:
+            return "ta"
+        if 0x0C80 <= codepoint <= 0x0CFF:
+            return "kn"
+        if 0x0900 <= codepoint <= 0x097F:
+            return "hi"
     try:
-        from deep_translator import GoogleTranslator
-        # Map target long names to short codes if necessary
-        lang_codes = {"English": "en", "Hindi": "hi", "Telugu": "te", "Tamil": "ta"}
-        code = lang_codes.get(target_lang, "en")
-        translated = GoogleTranslator(source='auto', target=code).translate(text)
-        LOCAL_TRANSLATION_CACHE[cache_key] = translated
-        return translated
+        from langdetect import detect
+        guess = detect(text)
+        return guess if guess in SUPPORTED_LANGUAGES else "en"
     except Exception:
-        return text
+        return "en"
 
-# --- CORE BACKEND SYSTEM ENDPOINTS ---
+
+def _hashing_embedding(text: str) -> list[float]:
+    """Local lexical vector fallback. For cross-language semantics install LaBSE."""
+    vector = [0.0] * EMBEDDING_DIMENSION
+    tokens = re.findall(r"[^\W_]+", text.casefold(), flags=re.UNICODE)
+    features: list[tuple[str, float]] = [(token, 1.0) for token in tokens]
+    for token in tokens:
+        padded = f"^{token}$"
+        for size in (2, 3, 4):
+            for index in range(max(0, len(padded) - size + 1)):
+                features.append((padded[index:index + size], 0.25))
+    for feature, weight in features:
+        digest = hashlib.blake2b(feature.encode("utf-8"), digest_size=8).digest()
+        number = int.from_bytes(digest, "big")
+        vector[number % EMBEDDING_DIMENSION] += weight if number & 1 else -weight
+    norm = math.sqrt(sum(value * value for value in vector))
+    return [value / norm for value in vector] if norm else vector
+
+
+def embed_text(text: str) -> list[float]:
+    global _encoder, _encoder_attempted
+    mode = os.getenv("EMBEDDING_BACKEND", "auto").strip().lower()
+    if mode not in {"hashing", "local", "off"} and not _encoder_attempted:
+        _encoder_attempted = True
+        try:
+            from sentence_transformers import SentenceTransformer
+            _encoder = SentenceTransformer(os.getenv("EMBEDDING_MODEL", "sentence-transformers/LaBSE"))
+        except Exception:
+            _encoder = None
+    if _encoder is not None and mode not in {"hashing", "local", "off"}:
+        try:
+            result = _encoder.encode(text, normalize_embeddings=True)
+            return result.tolist() if hasattr(result, "tolist") else list(result)
+        except Exception:
+            _encoder = None
+    return _hashing_embedding(text)
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if len(left) != len(right):
+        return 0.0
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if not left_norm or not right_norm:
+        return 0.0
+    return sum(a * b for a, b in zip(left, right)) / (left_norm * right_norm)
+
+
+def _document_embedding(document: DBDocument) -> list[float]:
+    if document.id not in _DOCUMENT_EMBEDDINGS:
+        _DOCUMENT_EMBEDDINGS[document.id] = embed_text(document.content)
+    return _DOCUMENT_EMBEDDINGS[document.id]
+
+
+def _language_name(preferred: str, query: str) -> str:
+    candidate = (preferred or "auto").strip().lower()
+    if candidate in {"auto", "detect", "automatic"}:
+        candidate = detect_language(query)
+    if candidate in SUPPORTED_LANGUAGES:
+        return SUPPORTED_LANGUAGES[candidate]
+    return SUPPORTED_LANGUAGES.get(LANGUAGE_CODES.get(candidate, ""), "English")
+
+
+def _parse_document_file(filename: str, raw: bytes) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".txt", ".md", ".pdf"}:
+        raise HTTPException(status_code=415, detail="Unsupported file type. Upload a .txt, .md, or text-based .pdf file.")
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MiB limit.")
+    if not raw:
+        raise HTTPException(status_code=422, detail="The uploaded file is empty.")
+    if suffix == ".pdf":
+        try:
+            from io import BytesIO
+            from pypdf import PdfReader
+            reader = PdfReader(BytesIO(raw))
+            text = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail="Could not read this PDF. Upload a valid text-based PDF.") from exc
+        if not text:
+            raise HTTPException(status_code=422, detail="No selectable text found. Scanned PDFs need OCR first.")
+        return text
+    try:
+        return raw.decode("utf-8-sig").strip()
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=422, detail="Text files must be encoded as UTF-8.") from exc
+
+
+def _save_document(db: Session, title: str, content: str, category: str = "General") -> DBDocument:
+    clean_title = (title or "Untitled document").strip()[:255] or "Untitled document"
+    clean_content = (content or "").strip()
+    if not clean_content:
+        raise HTTPException(status_code=422, detail="Document content cannot be empty.")
+    document = DBDocument(
+        title=clean_title,
+        content=clean_content,
+        language=SUPPORTED_LANGUAGES[detect_language(clean_content)],
+        category=(category or "General").strip()[:100] or "General",
+    )
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+    _DOCUMENT_EMBEDDINGS[document.id] = embed_text(clean_content)
+    return document
+
+
+def _serialize_history(item: ChatHistory) -> dict:
+    try:
+        sources = json.loads(item.sources_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        sources = []
+    return {
+        "id": item.id, "question": item.question, "answer": item.answer,
+        "language": item.language, "answer_mode": item.answer_mode,
+        "sources": sources, "created_at": item.created_at,
+    }
+
+
+def _local_answer(question: str, documents: list[DBDocument]) -> str:
+    """Extract relevant sentences when no hosted LLM is configured."""
+    candidates: list[tuple[int, str]] = []
+    question_terms = set(re.findall(r"[^\W_]+", question.casefold(), flags=re.UNICODE))
+    for document in documents:
+        chunks = re.split(r"(?<=[.!?।])\s+|\n+", document.content.strip())
+        for chunk in chunks:
+            sentence = chunk.strip()
+            if sentence:
+                terms = set(re.findall(r"[^\W_]+", sentence.casefold(), flags=re.UNICODE))
+                candidates.append((len(question_terms & terms), sentence))
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    useful = [sentence for score, sentence in candidates if score > 0][:3]
+    if useful:
+        return " ".join(useful)
+    if documents:
+        return re.split(r"(?<=[.!?।])\s+|\n+", documents[0].content.strip())[0][:900]
+    return "No documents are available yet. Upload a document, then ask again."
+
+
+def _generate_answer(question: str, context: str, language: str, documents: list[DBDocument]) -> tuple[str, str, Optional[str]]:
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    if not api_key:
+        return _local_answer(question, documents), "extractive-fallback", "GROQ_API_KEY is not configured; returned an extractive answer."
+    try:
+        from groq import Groq
+        completion = Groq(api_key=api_key).chat.completions.create(
+            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            messages=[
+                {"role": "system", "content": (
+                    "Answer only from the supplied context. Do not invent facts. "
+                    "If context is insufficient, say so. Keep concise. Answer in " + language + "."
+                )},
+                {"role": "user", "content": "Context:\n" + context + "\n\nQuestion:\n" + question},
+            ],
+            temperature=0.1,
+        )
+        answer = (completion.choices[0].message.content or "").strip()
+        if not answer:
+            raise RuntimeError("Empty response from answer provider")
+        return answer, "groq-llm", None
+    except Exception:
+        return _local_answer(question, documents), "extractive-fallback", "The LLM provider was unavailable; returned an extractive answer."
+
+
+@app.get("/")
+def root() -> dict:
+    return {"name": app.title, "version": app.version, "docs": "/docs", "health": "/health"}
+
 
 @app.get("/health")
-def system_health():
-    return {"status": "operational", "timestamp": datetime.datetime.utcnow()}
-
-@app.get("/articles")
-def read_all_articles(db: Session = Depends(get_db)):
-    return db.query(DBDocument).all()
-
-@app.post("/upload")
-async def ingest_document(
-    title: str = Form(...),
-    content: str = Form(...),
-    category: str = Form("General"),
-    db: Session = Depends(get_db)
-):
-    # Core Feature: Automatic Language Identification
-    try:
-        detected_iso = detect(content)
-        lang_mapping = {"en": "English", "hi": "Hindi", "te": "Telugu", "ta": "Tamil"}
-        language = lang_mapping.get(detected_iso, "English")
-    except Exception:
-        language = "English"
-
-    # 1. Persistent Storage Save (SQL)
-    db_doc = DBDocument(title=title, content=content, language=language, category=category)
-    db.add(db_doc)
-    db.commit()
-    db.refresh(db_doc)
-
-    # 2. Multilingual Embedding Vector Extraction via LaBSE
-    vector = encoder.encode(content)
-    LOCAL_VECTOR_INDEX[db_doc.id] = vector.tolist()
-
+def system_health() -> dict:
     return {
-        "message": "Document processed and indexed successfully", 
-        "document_id": db_doc.id, 
-        "detected_language": language
+        "status": "operational",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "groq_configured": bool(os.getenv("GROQ_API_KEY", "").strip()),
+        "embedding_backend": os.getenv("EMBEDDING_BACKEND", "auto"),
     }
+
+
+@app.get("/articles", response_model=None)
+def read_all_articles(db: Session = Depends(get_db)) -> list[DBDocument]:
+    return db.query(DBDocument).order_by(DBDocument.created_at.desc(), DBDocument.id.desc()).all()
+
+
+@app.get("/documents/{document_id}", response_model=None)
+def read_document(document_id: int, db: Session = Depends(get_db)) -> DBDocument:
+    document = db.query(DBDocument).filter(DBDocument.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return document
+
+
+@app.post("/upload", response_model=UploadResponse, status_code=201)
+def ingest_document(
+    title: str = Form(..., min_length=1, max_length=255),
+    content: str = Form(..., min_length=1),
+    category: str = Form("General", max_length=100),
+    db: Session = Depends(get_db),
+) -> UploadResponse:
+    document = _save_document(db, title, content, category)
+    return UploadResponse(message="Document saved and indexed.", document_id=document.id, title=document.title, detected_language=document.language)
+
+
+@app.post("/upload-file", response_model=UploadResponse, status_code=201)
+async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)) -> UploadResponse:
+    filename = Path(file.filename or "uploaded.txt").name
+    raw = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MiB limit.")
+    content = _parse_document_file(filename, raw)
+    document = _save_document(db, filename, content, "Uploaded")
+    return UploadResponse(message="File uploaded, parsed, saved, and indexed.", document_id=document.id, title=document.title, detected_language=document.language)
+
+
+@app.delete("/documents/{document_id}")
+def delete_document(document_id: int, db: Session = Depends(get_db)) -> dict:
+    document = db.query(DBDocument).filter(DBDocument.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    db.delete(document)
+    db.commit()
+    _DOCUMENT_EMBEDDINGS.pop(document_id, None)
+    return {"message": "Document deleted.", "document_id": document_id}
+
 
 @app.post("/ask")
-async def cross_language_query(payload: QueryRequest, db: Session = Depends(get_db)):
-    query_text = payload.query
-
-    language_map = {
-        "en": "English",
-        "hi": "Hindi",
-        "te": "Telugu",
-        "ta": "Tamil",
-        "kn": "Kannada"
-    }
-
-    selected_language = payload.preferred_language
-
-
-    try:
-        input_lang_iso = detect(query_text)
-
-        if selected_language == "auto":
-            selected_language = input_lang_iso
-
-    except Exception:
-        input_lang_iso = "en"
-        
-    user_lang = language_map.get(
-        selected_language,
-        "English"
-    )    
-
-    # Load vectors from DB if memory index is empty
-    if not LOCAL_VECTOR_INDEX:
-        docs = db.query(DBDocument).all()
-
-        for doc in docs:
-            vector = encoder.encode(doc.content)
-            LOCAL_VECTOR_INDEX[doc.id] = vector.tolist()
-
-    if not LOCAL_VECTOR_INDEX:
-        return {
-            "answer": "The platform database is currently empty. Please upload documents first.",
-            "sources": []
+def cross_language_query(payload: QueryRequest, db: Session = Depends(get_db)) -> dict:
+    question = payload.query.strip()
+    if not question:
+        raise HTTPException(status_code=422, detail="Question cannot be empty.")
+    documents = db.query(DBDocument).all()
+    language = _language_name(payload.preferred_language, question)
+    if not documents:
+        answer = "The knowledge base is empty. Upload a document before asking a question."
+        result = {
+            "answer": answer, "sources": [],
+            "detected_query_language": detect_language(question),
+            "answer_language": language, "answer_mode": "empty-knowledge-base", "notice": None,
         }
-
-    # Create query embedding
-    query_vector = encoder.encode(query_text)
-
-    scores = []
-
-    for doc_id, doc_vec in LOCAL_VECTOR_INDEX.items():
-
-        dot_product = np.dot(query_vector, doc_vec)
-
-        norm_q = np.linalg.norm(query_vector)
-        norm_d = np.linalg.norm(doc_vec)
-
-        similarity = (
-            dot_product / (norm_q * norm_d)
-            if (norm_q * norm_d) > 0
-            else 0
-        )
-
-        scores.append((doc_id, similarity))
-
-    scores.sort(key=lambda x: x[1], reverse=True)
-
-    top_matches = scores[:3]
-
-    context_segments = []
-    retrieved_sources = []
-
-    for doc_id, sim_score in top_matches:
-
-        if sim_score < 0.15:
-            continue
-
-        db_doc = (
-            db.query(DBDocument)
-            .filter(DBDocument.id == doc_id)
-            .first()
-        )
-
-        if db_doc:
-            context_segments.append(
-                f"Document Title: {db_doc.title} "
-                f"(Language: {db_doc.language})\n"
-                f"Content: {db_doc.content}"
-            )
-
-            retrieved_sources.append({
-                "id": db_doc.id,
-                "title": db_doc.title,
-                "language": db_doc.language
-            })
-
-    if not context_segments:
-        return {
-            "answer": "No relevant cross-lingual context matched your query.",
-            "sources": []
-        }
-
-    unified_context = "\n\n".join(context_segments)
-
-    prompt = f"""
-    You are a helpful AI assistant.
-
-    Use ONLY the provided context.
-
-    Rules:
-    - Give a short answer.
-    - Never repeat Document Title.
-    - Never repeat Content.
-    - Answer naturally.
-    - Use {user_lang} language.
-
-    Context:
-    {unified_context}
-
-    Question:
-    {query_text}
-
-    Answer:
-    """
-
-    try:
-        completion = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.2
-        )
-
-        final_answer = completion.choices[0].message.content.strip()
-
-    except Exception as e:
-        return {
-            "answer": f"Groq Error: {str(e)}",
-            "sources": []
-        }
-
-    return {
-        "answer": final_answer,
-        "sources": retrieved_sources,
-        "detected_query_iso": input_lang_iso
-    }
-    
-@app.post("/upload-file")
-async def upload_file(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db)
-):
-    content = await file.read()
-
-    if file.filename.endswith(".pdf"):
-
-        import io
-
-        pdf = PdfReader(
-            io.BytesIO(content)
-        )
-
-        text = ""
-
-        for page in pdf.pages:
-            text += page.extract_text() + "\n"
-
     else:
-        text = content.decode("utf-8")
-
-    try:
-        detected_iso = detect(text)
-
-        lang_mapping = {
-            "en": "English",
-            "hi": "Hindi",
-            "te": "Telugu",
-            "ta": "Tamil"
-        }
-
-        language = lang_mapping.get(
-            detected_iso,
-            "English"
+        query_embedding = embed_text(question)
+        ranked = sorted(
+            ((_cosine_similarity(query_embedding, _document_embedding(doc)), doc) for doc in documents),
+            key=lambda item: item[0],
+            reverse=True,
         )
-
-    except Exception:
-        language = "English"
-
-    db_doc = DBDocument(
-        title=file.filename,
-        content=text,
-        language=language,
-        category="Uploaded"
+        selected = [doc for score, doc in ranked[:payload.top_k] if score >= float(os.getenv("MIN_RETRIEVAL_SCORE", "0.04"))]
+        if not selected:
+            result = {
+                "answer": "I could not find relevant information in the uploaded documents. Try rephrasing or adding a relevant document.",
+                "sources": [], "detected_query_language": detect_language(question),
+                "answer_language": language, "answer_mode": "no-relevant-context", "notice": None,
+            }
+        else:
+            context = "\n\n".join(
+                "Source: " + doc.title + "\nLanguage: " + doc.language + "\nContent:\n" + doc.content[:12000]
+                for doc in selected
+            )
+            answer, mode, notice = _generate_answer(question, context, language, selected)
+            result = {
+                "answer": answer,
+                "sources": [{"id": doc.id, "title": doc.title, "language": doc.language, "category": doc.category} for doc in selected],
+                "detected_query_language": detect_language(question),
+                "answer_language": language, "answer_mode": mode, "notice": notice,
+            }
+    history = ChatHistory(
+        question=question, answer=result["answer"], language=result["answer_language"],
+        sources_json=json.dumps(result["sources"], ensure_ascii=False),
+        answer_mode=result["answer_mode"],
     )
-
-    db.add(db_doc)
+    db.add(history)
     db.commit()
-    db.refresh(db_doc)
+    return result
 
-    vector = encoder.encode(text)
 
-    LOCAL_VECTOR_INDEX[
-        db_doc.id
-    ] = vector.tolist()
+@app.get("/history")
+def read_history(limit: int = 100, db: Session = Depends(get_db)) -> list[dict]:
+    bounded_limit = max(1, min(limit, 500))
+    items = db.query(ChatHistory).order_by(ChatHistory.created_at.desc(), ChatHistory.id.desc()).limit(bounded_limit).all()
+    return [_serialize_history(item) for item in items]
 
+
+@app.delete("/history")
+def clear_history(db: Session = Depends(get_db)) -> dict:
+    deleted = db.query(ChatHistory).delete(synchronize_session=False)
+    db.commit()
+    return {"message": "Chat history cleared.", "deleted_count": deleted}
+
+
+@app.get("/stats")
+def get_stats(db: Session = Depends(get_db)) -> dict:
+    document_count = db.query(func.count(DBDocument.id)).scalar() or 0
+    question_count = db.query(func.count(ChatHistory.id)).scalar() or 0
+    rows = db.query(DBDocument.language, func.count(DBDocument.id)).group_by(DBDocument.language).all()
     return {
-        "message": "File Uploaded Successfully",
-        "document_id": db_doc.id,
-        "filename": file.filename
-    }    
+        "document_count": document_count,
+        "question_count": question_count,
+        "language_counts": {language: count for language, count in rows},
+        "supported_languages": SUPPORTED_LANGUAGES,
+    }

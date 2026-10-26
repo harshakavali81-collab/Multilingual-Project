@@ -1,213 +1,114 @@
 # Multilingual Indian Language Knowledge Base Platform
 
-## Project Overview
-
-This project is a multilingual knowledge base platform that allows users to upload documents and ask questions in multiple Indian languages.
-
-Supported Languages:
-
-- English
-- Hindi
-- Telugu
-- Tamil
-- Kannada
-
-The system retrieves information from uploaded documents and returns answers in the user's preferred language.
-
----
+A full-stack knowledge-base application for adding documents and asking grounded questions in English, Hindi, Telugu, Tamil, and Kannada.
 
 ## Features
 
-### Document Upload
+- Responsive React and Vite user interface.
+- FastAPI backend with SQLite for local use and PostgreSQL for Docker deployments.
+- Add text articles or upload text, Markdown, and text-based PDF documents.
+- Language identification and semantic-style retrieval; LaBSE embeddings are enabled when the optional ML package and model are available.
+- Optional Groq-generated answers with an extractive local fallback when the API key is not configured.
+- Source document references, persistent chat history, export-to-JSON, document deletion, language counts, and dashboard statistics.
+- API documentation at the FastAPI Swagger page.
+- Unit/API tests, GitHub Actions checks, Docker Compose deployment, architecture diagrams, and a project report.
 
-- Upload text documents
-- Automatic language detection
-- Store documents in database
+## Repository layout
 
-### Multilingual Search
+- backend/main.py — API, persistence, retrieval, answer generation, upload parsing, and analytics.
+- backend/requirements.txt — core runtime and test dependencies.
+- backend/requirements-ml.txt — optional Sentence Transformers dependency for LaBSE.
+- backend/tests — API test suite.
+- frontend/src — React UI and responsive styling.
+- docker-compose.yml — PostgreSQL, API, and UI services.
+- docs — workflow, architecture, API reference, deployment guide, test plan, and project report.
 
-- Query documents in different languages
-- Cross-language retrieval support
+## Run locally
 
-### Translation Support
+### 1. Start the API
 
-- English
-- Hindi
-- Telugu
-- Tamil
-- Kannada
+In a terminal:
 
-### Auto Detect Language
+    cd backend
+    python -m venv .venv
 
-- Detect query language automatically
+Activate the environment on Windows PowerShell:
 
-### Chat History
+    .venv\Scripts\Activate.ps1
 
-- Stores previous questions and answers
+On macOS/Linux:
 
-### Source Display
+    source .venv/bin/activate
 
-- Shows source documents used to generate answers
+Install dependencies and start the service:
 
-### Loading Indicator
+    python -m pip install -r requirements.txt
+    uvicorn main:app --reload
 
-- Displays "Thinking..." while processing
+The API is available at http://localhost:8000 and the interactive API guide at http://localhost:8000/docs. Copy backend/.env.example to backend/.env to set environment values. GROQ_API_KEY is optional; without it, the API uses an extractive fallback answer. The first LaBSE model load may download a large model. For a lightweight offline run, set EMBEDDING_BACKEND=hashing.
 
-### Document Preview
+### 2. Start the frontend
 
-- Shows uploaded document preview
+Open another terminal:
 
-### Language Analytics
+    cd frontend
+    npm install
+    npm run dev
 
-- Displays language usage statistics
+Open the URL printed by Vite, usually http://localhost:5173. Set VITE_API_BASE_URL in frontend/.env.local if the API runs elsewhere.
 
-### Export Chat
+## Run tests
 
-- Download chat history as JSON file
+From the repository root:
 
----
+    EMBEDDING_BACKEND=hashing python -m pytest -q backend/tests
 
-## Technology Stack
+On Windows PowerShell:
 
-### Frontend
+    $env:EMBEDDING_BACKEND = "hashing"
+    python -m pytest -q backend/tests
 
-- React.js
-- Vite
-- JavaScript
-- CSS
+The GitHub Actions workflow also installs frontend dependencies, runs lint and production build, and validates the Docker Compose configuration.
 
-### Backend
+## Run with Docker Compose
 
-- FastAPI
-- Python
+Copy .env.example to .env, change DB_PASSWORD to a strong local value, and optionally add GROQ_API_KEY. Then run:
 
-### Database
+    docker compose up --build
 
-- SQLite
+Open http://localhost:3000 for the app, http://localhost:8000/docs for the API, and http://localhost:8000/health for health status. Compose stores PostgreSQL data in the named postgres_data volume.
 
-### AI / NLP
+## API routes
 
-- Sentence Transformers
-- LangDetect
-- Translation APIs
-- Groq API
+- GET /health — backend status and optional provider configuration indicator.
+- GET /articles — list documents.
+- GET /documents/{document_id} — retrieve one document.
+- POST /upload — save text submitted as form fields title, content, and category.
+- POST /upload-file — upload .txt, .md, or a text-based .pdf file.
+- DELETE /documents/{document_id} — delete one document.
+- POST /ask — ask a question. JSON fields: query, preferred_language, and optional top_k.
+- GET /history — retrieve saved Q&A history.
+- DELETE /history — clear saved chat history.
+- GET /stats — document and question counts plus language breakdown.
 
----
+## Retrieval and AI notes
 
-## Project Structure
+When configured, Sentence Transformers loads sentence-transformers/LaBSE for multilingual embeddings. If that optional model cannot load, the backend stays available with a deterministic local hashing/lexical vector fallback. That fallback is useful for offline demos and basic same-language matching; it is not equivalent to a multilingual transformer. Configure GROQ_API_KEY to use the Groq chat-completions service. Model output is instructed to stay grounded in retrieved context, and the API reports its answer mode and any fallback notice.
 
-```
-Multilingual Project
-│
-├── frontend
-│ ├── src
-│ ├── public
-│ └── package.json
-│
-├── backend
-│ ├── main.py
-│ ├── models.py
-│ ├── services.py
-│ ├── requirements.txt
-│ └── local_kb.db
-│
-└── README.md
-```
+Uploads are limited by MAX_UPLOAD_BYTES (10 MiB by default). Scanned PDFs do not contain selectable text; OCR is not included. Do not commit credentials, private documents, virtual environments, database files, or model caches.
 
----
+## Project documentation
 
-## Installation
+Start with docs/PROJECT_WORKFLOW.md and docs/ARCHITECTURE.md for system flow and component boundaries. docs/API_REFERENCE.md lists request and response shapes. docs/DEPLOYMENT.md, docs/TEST_PLAN.md, and docs/PROJECT_REPORT.md cover deployment, verification, and the project explanation. A PDF version of the report is included in the project bundle.
 
-### Backend
+## Troubleshooting
 
-Create virtual environment
+- API offline in the UI: start the backend and verify VITE_API_BASE_URL.
+- LLM responses unavailable: verify GROQ_API_KEY; without it, fallback mode is expected.
+- First LaBSE run is slow: model download and initial loading may take time. Use EMBEDDING_BACKEND=hashing for offline testing.
+- PostgreSQL connection fails in Compose: check DB_PASSWORD and ensure the database service is healthy.
+- PDF contains no text: upload a text-based PDF or extract text before upload.
 
-```bash
-python -m venv .venv
-```
+## License
 
-Activate
-
-```bash
-.venv\Scripts\activate
-```
-
-Install packages
-
-```bash
-pip install -r requirements.txt
-```
-
-Run backend
-
-```bash
-uvicorn main:app --reload
-```
-
----
-
-### Frontend
-
-Go to frontend folder
-
-```bash
-cd frontend
-```
-
-Install packages
-
-```bash
-npm install
-```
-
-Run frontend
-
-```bash
-npm run dev
-```
-
----
-
-## API Endpoints
-
-### Ask Question
-
-```http
-POST /ask
-```
-
-### Upload File
-
-```http
-POST /upload-file
-```
-
----
-
-## Screenshots
-
-Add screenshots of:
-
-- Home Page
-- File Upload
-- Question Answering
-- Source Display
-- Language Analytics
-
----
-
-## Future Improvements
-
-- Voice Input
-- PDF Support
-- Docker Deployment
-- Admin Dashboard
-- Advanced Analytics
-
----
-
-## Author
-
-Harsha Kavali
-
-Multilingual Indian Language Knowledge Base Platform
+Unless a license is added by the project owner, all rights remain with the repository owner. Choose an open-source license explicitly if you want to grant reuse rights.

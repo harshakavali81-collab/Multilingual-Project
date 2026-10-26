@@ -1,0 +1,2 @@
+# Optional multilingual transformer embeddings. May download a large model on first run.
+sentence-transformers>=3.4,<6.0

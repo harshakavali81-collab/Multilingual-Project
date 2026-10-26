@@ -1,0 +1,17 @@
+flowchart TD
+    A[Start app] --> B[Add text or upload file]
+    B --> C[Validate file type, size, and content]
+    C --> D[Detect language]
+    D --> E[Persist document]
+    E --> F[Create or cache embedding]
+    F --> G[User submits question]
+    G --> H[Embed question and rank documents]
+    H --> I{Relevant context found?}
+    I -->|No| J[Return no-context response]
+    I -->|Yes| K{Groq configured?}
+    K -->|Yes| L[Generate grounded answer]
+    K -->|No or provider fails| M[Extractive fallback answer]
+    J --> N[Save Q&A history]
+    L --> N
+    M --> N
+    N --> O[Show answer, sources, and history]

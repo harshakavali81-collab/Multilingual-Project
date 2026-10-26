@@ -1,0 +1,13 @@
+flowchart LR
+    U[User / Browser] --> FE[React + Vite UI]
+    FE --> API[FastAPI REST API]
+    API --> DB[(SQLite locally / PostgreSQL in Compose)]
+    API --> RET[Embedding and retrieval layer]
+    RET --> DOCS[Ranked document context]
+    DOCS --> LLM{Groq key configured?}
+    LLM -->|Yes| GROQ[Groq chat completion]
+    LLM -->|No or failed| FALLBACK[Extractive answer fallback]
+    GROQ --> OUT[Answer + source metadata]
+    FALLBACK --> OUT
+    OUT --> HIST[(Persistent chat history)]
+    OUT --> FE
