@@ -91,3 +91,31 @@ textarea::placeholder, input::placeholder { color: #a0a0b2; }
 @media (max-width: 900px) { .app-shell { padding: 0 20px 24px; }.hero { padding: 32px; }.hero-illustration { min-width: 155px; margin-right: 0; transform: scale(.82); transform-origin: center right; }.workspace-grid { grid-template-columns: minmax(0,1fr) minmax(290px,.88fr); gap: 14px; }.ask-panel,.upload-panel,.documents-panel,.history-panel { padding: 18px; }.metrics-grid { gap: 10px; }.metric-card { padding: 13px; gap: 9px; }.metric-icon { flex-basis: 35px; height: 35px; }.metric-card strong { font-size: 22px; } }
 @media (max-width: 720px) { .app-shell { padding: 0 14px 22px; }.topbar { height: 69px; }.hero { min-height: auto; padding: 29px 22px; margin-top: 18px; }.hero-illustration { display: none; }.hero h1 { font-size: clamp(27px,7vw,38px); letter-spacing: -1.2px; }.hero-description { font-size: 12px; }.metrics-grid { grid-template-columns: 1fr 1fr; }.language-metric { grid-column: 1/-1; }.workspace-grid { grid-template-columns: 1fr; }.side-panels { gap: 14px; }.history-heading { align-items: flex-start; flex-direction: column; }.history-actions { width: 100%; justify-content: flex-end; }.history-list { grid-template-columns: 1fr; }.footer { align-items: flex-start; flex-direction: column; gap: 9px; }.footer p { text-align: left; }.ask-controls { align-items: stretch; flex-direction: column; }.language-select-label { max-width: none; }.primary-button { min-height: 43px; }.panel-heading h2 { font-size: 14px; } }
 @media (max-width: 420px) { .brand-mark { width: 36px; height: 36px; }.connection-state { font-size: 10px; padding: 6px 8px; }.hero { padding: 25px 18px; }.metrics-grid { gap: 8px; }.metric-card { padding: 11px 9px; }.metric-card p { font-size: 10px; }.metric-card strong { font-size: 20px; }.metric-language-text { font-size: 11px !important; }.ask-panel,.upload-panel,.documents-panel,.history-panel { padding: 15px; }.history-actions { justify-content: space-between; }.secondary-button { padding: 0 9px; } }
+
+/* Analytics and private-mode control */
+.api-key-control{display:flex;align-items:center;gap:7px;margin-left:auto;margin-right:14px}
+.api-key-control label{font-size:10px;color:#77718f;white-space:nowrap}
+.api-key-control input{width:130px;padding:8px;font-size:11px}
+.api-key-control button{background:#edeaff;color:#5f50bd;border:1px solid #ded8ff;border-radius:8px;padding:8px 10px;font-size:10px;font-weight:700;cursor:pointer}
+.analytics-panel{margin-bottom:22px;padding:23px}
+.analytics-grid{display:grid;grid-template-columns:1fr 1.2fr 1fr;gap:16px;margin-top:19px}
+.analytics-chart{min-width:0;border:1px solid #eeecf6;background:#fcfbff;border-radius:13px;padding:15px}
+.analytics-chart h3{margin:0 0 15px;font-size:12px;font-weight:800;color:#3d3a55}
+.bar-line{display:grid;grid-template-columns:63px 1fr 23px;align-items:center;gap:7px;margin:10px 0;font-size:10px;color:#716d87}
+.bar-line strong{text-align:right;color:#51449f;font-size:10px}
+.bar-track{height:9px;border-radius:10px;background:#eeeafb;overflow:hidden}
+.bar-fill{height:100%;border-radius:10px;background:linear-gradient(90deg,#8978ee,#5543c4)}
+.daily-bars{display:flex;align-items:stretch;justify-content:space-between;gap:4px;min-height:155px;border-bottom:1px solid #eae7f5}
+.daily-bar-column{display:flex;flex:1;flex-direction:column;align-items:center;justify-content:flex-end;min-width:0}
+.daily-bar-fill{width:74%;max-width:23px;min-height:3px;background:#79a5ed;border-radius:5px 5px 0 0;transition:height .2s}
+.daily-bar-column span{display:block;min-height:18px;font-size:8px;color:#8b86a0;padding-top:5px;writing-mode:vertical-rl}
+.category-chips{display:flex;gap:7px;flex-wrap:wrap}
+.category-chips span{border-radius:7px;background:#edeafb;padding:7px;font-size:10px;color:#594bbb}
+.category-chips strong{margin-left:4px}
+.sub-chart-heading{margin-top:18px!important}
+.chart-empty,.chart-footnote{color:#8c879f;font-size:10px;line-height:1.5}
+.chart-footnote{margin-top:12px}
+.library-filter-label{display:block;margin:2px 0 5px;font-size:10px;font-weight:700;color:#77718f}
+.library-filter{margin-bottom:13px}
+@media(max-width:980px){.analytics-grid{grid-template-columns:1fr 1fr}.analytics-chart:last-child{grid-column:1/-1}.api-key-control label{display:none}}
+@media(max-width:720px){.analytics-grid{grid-template-columns:1fr}.analytics-chart:last-child{grid-column:auto}.api-key-control{gap:4px;margin:0 8px}.api-key-control input{width:103px}.api-key-control button{padding:7px}}

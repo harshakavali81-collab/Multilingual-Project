@@ -112,3 +112,10 @@ Start with docs/PROJECT_WORKFLOW.md and docs/ARCHITECTURE.md for system flow and
 ## License
 
 Unless a license is added by the project owner, all rights remain with the repository owner. Choose an open-source license explicitly if you want to grant reuse rights.
+
+## 2026 completion upgrade
+The `feature/finalize-analytics-diagrams-and-security` branch adds **DOCX and CSV ingestion**, a **document-length guard**, optional single-user **APP_API_KEY** private mode, **/search** and **/analytics** endpoints, and live bar charts for language distribution and daily question traffic. Charts always use real SQLite/PostgreSQL counts (zero before use); no invented sample metrics.
+
+**Private mode:** set APP_API_KEY in the backend environment, then enter that key into the frontend's optional private-key field and click Connect. Do not set a VITE_APP_API_KEY or otherwise embed the secret in frontend source. This is a shared-key demo, not multi-user login.
+
+**Project structure and diagrams:** see [full tree](docs/PROJECT_TREE.md), [component architecture](docs/diagrams/architecture.mmd), [database relationships](docs/diagrams/database-erd.mmd), [question sequence](docs/diagrams/qa-sequence.mmd), [deployment graph](docs/diagrams/deployment.mmd), and [analytics data flow](docs/diagrams/analytics-flow.mmd). [Analytics guide](docs/ANALYTICS.md) and [release checklist](docs/RELEASE_CHECKLIST.md) provide descriptions and verification criteria.

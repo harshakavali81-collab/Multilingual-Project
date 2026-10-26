@@ -1,0 +1,19 @@
+erDiagram
+  DOCUMENTS {
+    integer id PK
+    varchar title
+    text content
+    varchar language
+    varchar category
+    datetime created_at
+  }
+  CHAT_HISTORY {
+    integer id PK
+    text question
+    text answer
+    varchar language
+    text sources_json
+    varchar answer_mode
+    datetime created_at
+  }
+  DOCUMENTS ||--o{ CHAT_HISTORY : "cited in source metadata (logical)"

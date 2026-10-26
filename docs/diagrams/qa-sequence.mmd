@@ -1,0 +1,23 @@
+sequenceDiagram
+  autonumber
+  actor User
+  participant UI as React Frontend
+  participant API as FastAPI
+  participant DB as SQLite/PostgreSQL
+  participant EMB as Retrieval (LaBSE or hashing)
+  participant LLM as Groq (optional)
+  User->>UI: Ask a question, choose answer language
+  UI->>API: POST /ask
+  API->>DB: Load indexed documents
+  DB-->>API: Records
+  API->>EMB: Embed query and documents
+  EMB-->>API: Ranked context
+  alt Relevant documents and Groq enabled
+    API->>LLM: Prompt with cited context
+    LLM-->>API: Answer in requested language
+  else Offline / no key
+    API->>API: Extract matching source sentences
+  end
+  API->>DB: Persist question, answer and sources
+  API-->>UI: Answer, source IDs and mode
+  UI-->>User: Render answer and live graphs
