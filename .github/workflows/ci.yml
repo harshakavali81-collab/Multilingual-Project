@@ -55,5 +55,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build backend image
         run: docker build -t multilingual-kb-backend:ci ./backend
+      - name: Build production frontend image
+        run: docker build -t multilingual-kb-frontend:ci ./frontend
       - name: Validate Compose configuration
         run: docker compose config --quiet
+      - name: Validate production Compose configuration
+        env:
+          DB_PASSWORD: ci-long-alphanumeric-password
+          ADMIN_EMAIL: ci@example.test
+          ADMIN_PASSWORD: ci-long-admin-password
+        run: docker compose -f docker-compose.prod.yml config --quiet

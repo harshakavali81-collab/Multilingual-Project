@@ -119,3 +119,15 @@ The `feature/finalize-analytics-diagrams-and-security` branch adds **DOCX and CS
 **Private mode:** set APP_API_KEY in the backend environment, then enter that key into the frontend's optional private-key field and click Connect. Do not set a VITE_APP_API_KEY or otherwise embed the secret in frontend source. This is a shared-key demo, not multi-user login.
 
 **Project structure and diagrams:** see [full tree](docs/PROJECT_TREE.md), [component architecture](docs/diagrams/architecture.mmd), [database relationships](docs/diagrams/database-erd.mmd), [question sequence](docs/diagrams/qa-sequence.mmd), [deployment graph](docs/diagrams/deployment.mmd), and [analytics data flow](docs/diagrams/analytics-flow.mmd). [Analytics guide](docs/ANALYTICS.md) and [release checklist](docs/RELEASE_CHECKLIST.md) provide descriptions and verification criteria.
+
+## Production-ready container and account support
+
+See [Production deployment](docs/PRODUCTION_DEPLOYMENT.md). The `docker-compose.prod.yml` stack uses a compiled React app served by Nginx, same-origin `/api` proxy, PostgreSQL, required password sign-in, individual workspaces and admin-created accounts. Configure HTTPS/TLS at your reverse proxy.
+
+- Account APIs: `POST /auth/login`, `GET /auth/me`, `POST /auth/logout`, `POST /auth/change-password`, `GET|POST /admin/users`.
+- Bootstrap only: `ADMIN_EMAIL` and `ADMIN_PASSWORD` create an initial admin on the first start of an empty production auth database.
+- User data is isolated by owner_id. Existing NULL-owner legacy rows are not automatically claimed.
+- Production backup and restore: `scripts/backup-postgres.sh`, `scripts/restore-postgres.sh`.
+- Local Docker Compose now serves the compiled app at http://localhost:3000; run Vite separately for hot-reload development.
+
+**Public deployment is not automatic** and cannot be considered complete until a real host, TLS, administrator setup and backup/restore verification exist.

@@ -1,13 +1,16 @@
 flowchart LR
-    U[User / Browser] --> FE[React + Vite UI]
-    FE --> API[FastAPI REST API]
-    API --> DB[(SQLite locally / PostgreSQL in Compose)]
-    API --> RET[Embedding and retrieval layer]
-    RET --> DOCS[Ranked document context]
-    DOCS --> LLM{Groq key configured?}
-    LLM -->|Yes| GROQ[Groq chat completion]
-    LLM -->|No or failed| FALLBACK[Extractive answer fallback]
-    GROQ --> OUT[Answer + source metadata]
-    FALLBACK --> OUT
-    OUT --> HIST[(Persistent chat history)]
-    OUT --> FE
+  User["Browser user"] --> UI["Nginx-served React UI"]
+  UI --> Auth["FastAPI auth middleware"]
+  Auth -->|Login| Session["Argon2 passwords and hashed session tokens"]
+  Auth -->|Authorized workspace| API["FastAPI routes"]
+  Session --> Users[("Auth users and sessions")]
+  API --> Owner["Owner-scoped SQL queries"]
+  Owner --> DB[("PostgreSQL documents and history")]
+  API --> Retrieval["LaBSE optional or hashing fallback"]
+  Retrieval --> LLM{"Groq key configured?"}
+  LLM -->|Yes| Generation["Grounded LLM answer"]
+  LLM -->|No| Fallback["Extractive source answer"]
+  Generation --> DB
+  Fallback --> DB
+  DB --> Graphs["Real analytics graphs"]
+  Graphs --> UI

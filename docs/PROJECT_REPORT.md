@@ -34,3 +34,6 @@ The hashing vectorizer is a lightweight offline fallback and does not deliver fu
 ## Run
 Install the backend requirements in backend, start Uvicorn, then install frontend packages and run Vite. Alternatively use Docker Compose. See README.md, docs/DEPLOYMENT.md, and docs/API_REFERENCE.md for exact steps.
 
+
+## Authenticated production hardening
+A later production-support upgrade adds administrator-created Argon2 password accounts, hashed/revocable session tokens, per-account document and analytics isolation, session revocation and lockout tests. Additive owner-column migration keeps legacy records unassigned and private. The Nginx compiled frontend is proxied to FastAPI under /api; PostgreSQL remains internal to the private production Compose stack. Backup and restore scripts are provided but are **not** an active off-site backup service or completed public deployment.

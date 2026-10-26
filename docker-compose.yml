@@ -26,6 +26,11 @@ services:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/LaBSE}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
+      MAX_DOCUMENT_CHARS: ${MAX_DOCUMENT_CHARS:-200000}
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-false}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      APP_API_KEY: ${APP_API_KEY:-}
       PYTHONUNBUFFERED: "1"
     ports:
       - "8000:8000"
@@ -43,10 +48,10 @@ services:
   frontend:
     build:
       context: ./frontend
-    environment:
-      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+      args:
+        VITE_API_BASE_URL: /api
     ports:
-      - "3000:5173"
+      - "3000:8080"
     depends_on:
       backend:
         condition: service_healthy

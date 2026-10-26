@@ -108,3 +108,129 @@ def test_optional_private_mode(client, monkeypatch):
     assert client.get("/articles").status_code == 401
     assert client.get("/articles", headers={"X-API-Key": "wrong"}).status_code == 401
     assert client.get("/articles", headers={"X-API-Key": "a-local-test-secret"}).status_code == 200
+
+
+
+def test_password_login_and_tenant_isolation(client, monkeypatch):
+    import main
+
+    with main.SessionLocal() as db:
+        db.add(main.AuthUser(email="admin@example.test", password_hash=main._hasher.hash("change-admin-password"), role="admin"))
+        db.commit()
+
+    monkeypatch.setenv("AUTH_REQUIRED", "true")
+    assert client.get("/auth/status").json()["required"] is True
+    assert client.get("/articles").status_code == 401
+
+    invalid = client.post("/auth/login", json={"email": "admin@example.test", "password": "wrong"})
+    assert invalid.status_code == 401
+    admin_response = client.post("/auth/login", json={"email": "admin@example.test", "password": "change-admin-password"})
+    assert admin_response.status_code == 200
+    admin_token = admin_response.json()["access_token"]
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+    assert client.get("/auth/me", headers=admin_headers).json()["role"] == "admin"
+
+    member = client.post(
+        "/admin/users", headers=admin_headers,
+        json={"email": "member@example.test", "password": "member-very-long-password", "role": "member"}
+    )
+    assert member.status_code == 201
+    assert "password_hash" not in member.json()
+    member_response = client.post("/auth/login", json={"email": "member@example.test", "password": "member-very-long-password"})
+    assert member_response.status_code == 200
+    member_headers = {"Authorization": "Bearer " + member_response.json()["access_token"]}
+
+    admin_doc = client.post("/upload", headers=admin_headers, data={"title": "Admin", "content": "Secret administrator content unique-one"})
+    member_doc = client.post("/upload", headers=member_headers, data={"title": "Member", "content": "Private member content unique-two"})
+    assert admin_doc.status_code == member_doc.status_code == 201
+
+    member_id = member_doc.json()["document_id"]
+    admin_id = admin_doc.json()["document_id"]
+    assert [item["id"] for item in client.get("/articles", headers=member_headers).json()] == [member_id]
+    assert client.get(f"/documents/{admin_id}", headers=member_headers).status_code == 404
+    assert client.delete(f"/documents/{admin_id}", headers=member_headers).status_code == 404
+    assert client.post("/ask", headers=member_headers, json={"query": "member content"}).status_code == 200
+    assert client.get("/history", headers=admin_headers).json() == []
+    assert client.get("/stats", headers=member_headers).json()["document_count"] == 1
+    assert client.get("/analytics", headers=member_headers).json()["language_counts"] == {"English": 1}
+    assert all(hit["id"] != admin_id for hit in client.get("/search?q=unique-one", headers=member_headers).json()["results"])
+    assert client.get("/admin/users", headers=member_headers).status_code == 403
+
+    assert client.post("/auth/logout", headers=member_headers).status_code == 200
+    assert client.get("/articles", headers=member_headers).status_code == 401
+
+
+def test_change_password_revokes_all_sessions(client, monkeypatch):
+    import main
+
+    with main.SessionLocal() as db:
+        db.add(main.AuthUser(email="test@example.test", password_hash=main._hasher.hash("old-password-12345")))
+        db.commit()
+    monkeypatch.setenv("AUTH_REQUIRED", "true")
+    token1 = client.post("/auth/login", json={"email": "test@example.test", "password": "old-password-12345"}).json()["access_token"]
+    token2 = client.post("/auth/login", json={"email": "test@example.test", "password": "old-password-12345"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token1}"}
+    assert client.post("/auth/change-password", headers=headers, json={
+        "current_password": "old-password-12345", "new_password": "new-password-strong-123"
+    }).status_code == 200
+    assert client.get("/auth/me", headers=headers).status_code == 401
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {token2}"}).status_code == 401
+    assert client.post("/auth/login", json={"email": "test@example.test", "password": "new-password-strong-123"}).status_code == 200
+
+
+def test_login_lockout(client, monkeypatch):
+    import main
+    with main.SessionLocal() as db:
+        db.add(main.AuthUser(email="locked@example.test", password_hash=main._hasher.hash("secret-long-password")))
+        db.commit()
+    monkeypatch.setenv("AUTH_REQUIRED", "true")
+    for _ in range(5):
+        assert client.post("/auth/login", json={"email": "locked@example.test", "password": "wrong"}).status_code == 401
+    assert client.post("/auth/login", json={"email": "locked@example.test", "password": "secret-long-password"}).status_code == 429
+
+
+
+def test_admin_password_reset_revokes_existing_member_sessions(client, monkeypatch):
+    import main
+
+    with main.SessionLocal() as db:
+        db.add(main.AuthUser(email="admin@test.local", password_hash=main._hasher.hash("admin-secret-superlong"), role="admin"))
+        db.add(main.AuthUser(email="member@test.local", password_hash=main._hasher.hash("member-secret-superlong"), role="member"))
+        db.commit()
+
+    monkeypatch.setenv("AUTH_REQUIRED", "true")
+    admin_token = client.post("/auth/login", json={"email": "admin@test.local", "password": "admin-secret-superlong"}).json()["access_token"]
+    member_login = client.post("/auth/login", json={"email": "member@test.local", "password": "member-secret-superlong"})
+    member_token = member_login.json()["access_token"]
+    member_id = member_login.json()["user"]["id"]
+    admin_header = {"Authorization": "Bearer " + admin_token}
+    member_header = {"Authorization": "Bearer " + member_token}
+    assert client.post(
+        f"/admin/users/{member_id}/reset-password", headers=member_header,
+        json={"new_password": "new-member-superlong"}
+    ).status_code == 403
+    reset = client.post(
+        f"/admin/users/{member_id}/reset-password", headers=admin_header,
+        json={"new_password": "new-member-superlong"}
+    )
+    assert reset.status_code == 200
+    assert client.get("/auth/me", headers=member_header).status_code == 401
+    assert client.post("/auth/login", json={"email": "member@test.local", "password": "new-member-superlong"}).status_code == 200
+
+
+def test_migration_uses_nullable_owner_without_assigning_legacy_data(tmp_path, monkeypatch):
+    import main
+    from sqlalchemy import create_engine, inspect, text
+
+    legacy = create_engine("sqlite:///" + str(tmp_path / "legacy.db"))
+    with legacy.begin() as conn:
+        conn.execute(text("CREATE TABLE documents (id INTEGER PRIMARY KEY, title VARCHAR(255), content TEXT, language VARCHAR(20), category VARCHAR(100), created_at DATETIME)"))
+        conn.execute(text("CREATE TABLE chat_history (id INTEGER PRIMARY KEY, question TEXT, answer TEXT, language VARCHAR(20), sources_json TEXT, answer_mode VARCHAR(30), created_at DATETIME)"))
+        conn.execute(text("INSERT INTO documents (id, title, content, language) VALUES (1, 'old', 'legacy private data', 'English')"))
+    monkeypatch.setattr(main, "engine", legacy)
+    main.migrate_schema()
+    main.migrate_schema()
+    assert "owner_id" in [col["name"] for col in inspect(legacy).get_columns("documents")]
+    with legacy.connect() as conn:
+        assert conn.execute(text("SELECT owner_id FROM documents WHERE id=1")).scalar() is None
+    legacy.dispose()

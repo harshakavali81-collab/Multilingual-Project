@@ -19,8 +19,10 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine, func
+from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine, func, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from argon2 import PasswordHasher
+from argon2.exceptions import VerificationError
 
 try:
     from dotenv import load_dotenv
@@ -52,6 +54,7 @@ class DBDocument(Base):
     language = Column(String(20), nullable=False, default="English")
     category = Column(String(100), nullable=True, default="General")
     created_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+    owner_id = Column(Integer, nullable=True)
 
 
 class ChatHistory(Base):
@@ -63,9 +66,45 @@ class ChatHistory(Base):
     sources_json = Column(Text, nullable=False, default="[]")
     answer_mode = Column(String(30), nullable=False, default="extractive-fallback")
     created_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+    owner_id = Column(Integer, nullable=True)
+
+
+class AuthUser(Base):
+    __tablename__ = "auth_users"
+    id = Column(Integer, primary_key=True)
+    email = Column(String(254), unique=True, nullable=False, index=True)
+    password_hash = Column(Text, nullable=False)
+    role = Column(String(20), nullable=False, default="member")
+    failed_logins = Column(Integer, nullable=False, default=0)
+    locked_until = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_utcnow_naive)
+
+
+class LoginSession(Base):
+    __tablename__ = "login_sessions"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    token_hash = Column(String(64), unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=_utcnow_naive)
 
 
 Base.metadata.create_all(bind=engine)
+
+
+def migrate_schema() -> None:
+    """Idempotent, additive schema upgrade; back up the DB before deployment."""
+    with engine.begin() as conn:
+        for table_name in ("documents", "chat_history"):
+            names = {col["name"] for col in inspect(conn).get_columns(table_name)}
+            if "owner_id" not in names:
+                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN owner_id INTEGER"))
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table_name}_owner_id ON {table_name} (owner_id)"))
+
+
+migrate_schema()
+_hasher = PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1)
+
 
 SUPPORTED_LANGUAGES = {"en": "English", "hi": "Hindi", "te": "Telugu", "ta": "Tamil", "kn": "Kannada"}
 LANGUAGE_CODES = {name.lower(): code for code, name in SUPPORTED_LANGUAGES.items()}
@@ -83,6 +122,24 @@ class QueryRequest(BaseModel):
     top_k: int = Field(default=3, ge=1, le=10)
 
 
+class Credentials(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class NewUser(Credentials):
+    role: str = Field(default="member")
+
+
+class AdminPasswordReset(BaseModel):
+    new_password: str = Field(min_length=12, max_length=128)
+
+
+class PasswordChange(BaseModel):
+    current_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=12, max_length=128)
+
+
 class UploadResponse(BaseModel):
     message: str
     document_id: int
@@ -95,12 +152,88 @@ app = FastAPI(
     description="Grounded document retrieval across English, Hindi, Telugu, Tamil, and Kannada. GROQ_API_KEY is optional.",
     version="1.0.0",
 )
+
+def auth_enabled() -> bool:
+    return os.getenv("AUTH_REQUIRED", "false").lower() in ("1", "true", "yes")
+
+
+def _normalize_email(email: str) -> str:
+    email = email.strip().lower()
+    if not 3 <= len(email) <= 254 or "@" not in email or email.startswith("@"):
+        raise HTTPException(status_code=422, detail="A valid email address is required.")
+    return email
+
+
+def _principal(request: Request) -> Optional[int]:
+    return getattr(request.state, "user_id", None) if auth_enabled() else None
+
+
+def _user_scope(query, model, request: Request):
+    if auth_enabled():
+        return query.filter(model.owner_id == _principal(request))
+    return query
+
+
+def _public_user(user: AuthUser) -> dict:
+    return {"id": user.id, "email": user.email, "role": user.role}
+
+
+def bootstrap_admin() -> None:
+    """First boot only: provision admin from secret environment variables."""
+    if not auth_enabled():
+        return
+    with SessionLocal() as db:
+        if db.query(AuthUser).count():
+            return
+        email = os.getenv("ADMIN_EMAIL", "").strip()
+        password = os.getenv("ADMIN_PASSWORD", "")
+        if not email or len(password) < 12:
+            raise RuntimeError("AUTH_REQUIRED needs ADMIN_EMAIL and ADMIN_PASSWORD (12+ chars) on first boot.")
+        db.add(AuthUser(email=_normalize_email(email),
+                        password_hash=_hasher.hash(password), role="admin"))
+        db.commit()
+
+
+bootstrap_admin()
+
+
+def _revoke_user_sessions(db: Session, user_id: int) -> None:
+    db.query(LoginSession).filter(LoginSession.user_id == user_id).delete(synchronize_session=False)
+
+
+def _require_admin(request: Request) -> None:
+    if not auth_enabled() or getattr(request.state, "role", "") != "admin":
+        raise HTTPException(status_code=403, detail="Administrator access required.")
+
 @app.middleware("http")
 async def optional_api_key(request: Request, call_next):
     """Require a shared key for data routes only when explicitly configured."""
     expected = os.getenv("APP_API_KEY", "").strip()
-    public_paths = {"/", "/docs", "/openapi.json", "/redoc", "/health"}
-    if expected and request.url.path not in public_paths and request.method != "OPTIONS":
+    public_paths = {"/", "/docs", "/openapi.json", "/redoc", "/health", "/auth/status", "/auth/login"}
+    if request.method == "OPTIONS" or request.url.path in public_paths:
+        return await call_next(request)
+    if auth_enabled():
+        header = request.headers.get("authorization", "")
+        prefix = "Bearer "
+        if not header.startswith(prefix) or len(header) <= len(prefix):
+            return JSONResponse(status_code=401, content={"detail": "Please sign in."})
+        token = header[len(prefix):]
+        if len(token) > 256:
+            return JSONResponse(status_code=401, content={"detail": "Invalid session."})
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        with SessionLocal() as db:
+            session = db.query(LoginSession).filter(
+                LoginSession.token_hash == token_hash,
+                LoginSession.expires_at > _utcnow_naive(),
+            ).first()
+            user = db.get(AuthUser, session.user_id) if session else None
+            if not user:
+                return JSONResponse(status_code=401, content={"detail": "Session expired. Please sign in."})
+            request.state.user_id = user.id
+            request.state.role = user.role
+            request.state.session_id = session.id
+        return await call_next(request)
+    if expected:
         supplied = request.headers.get("x-api-key", "")
         if not secrets.compare_digest(supplied, expected):
             return JSONResponse(status_code=401, content={"detail": "Valid X-API-Key header required."})
@@ -117,7 +250,7 @@ app.add_middleware(
     allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "X-API-Key"],
 )
 
 
@@ -263,7 +396,7 @@ def _validated_content(value: str) -> str:
     return clean
 
 
-def _save_document(db: Session, title: str, content: str, category: str = "General") -> DBDocument:
+def _save_document(db: Session, title: str, content: str, category: str = "General", owner_id: Optional[int] = None) -> DBDocument:
     clean_title = (title or "Untitled document").strip()[:255] or "Untitled document"
     clean_content = _validated_content(content or "")
     document = DBDocument(
@@ -271,6 +404,7 @@ def _save_document(db: Session, title: str, content: str, category: str = "Gener
         content=clean_content,
         language=SUPPORTED_LANGUAGES[detect_language(clean_content)],
         category=(category or "General").strip()[:100] or "General",
+        owner_id=owner_id,
     )
     db.add(document)
     db.commit()
@@ -336,6 +470,124 @@ def _generate_answer(question: str, context: str, language: str, documents: list
         return _local_answer(question, documents), "extractive-fallback", "The LLM provider was unavailable; returned an extractive answer."
 
 
+
+@app.get("/auth/status")
+def auth_status() -> dict:
+    return {"required": auth_enabled(), "password_login": auth_enabled()}
+
+
+@app.post("/auth/login")
+def login(credentials: Credentials, db: Session = Depends(get_db)) -> dict:
+    if not auth_enabled():
+        raise HTTPException(status_code=404, detail="Password login not enabled.")
+    email = _normalize_email(credentials.email)
+    user = db.query(AuthUser).filter(AuthUser.email == email).first()
+    if not user:
+        # Ensure an unknown account still incurs password-hash work.
+        try:
+            _hasher.verify(_hasher.hash("dummy-unknown-password"), credentials.password)
+        except VerificationError:
+            pass
+        raise HTTPException(status_code=401, detail="Invalid credentials.")
+    now = _utcnow_naive()
+    if user.locked_until and user.locked_until > now:
+        raise HTTPException(status_code=429, detail="Account temporarily locked. Try again later.")
+    try:
+        _hasher.verify(user.password_hash, credentials.password)
+    except VerificationError:
+        user.failed_logins = (user.failed_logins or 0) + 1
+        if user.failed_logins >= 5:
+            user.failed_logins = 0
+            user.locked_until = now + timedelta(minutes=15)
+        db.commit()
+        raise HTTPException(status_code=401, detail="Invalid credentials.")
+    user.failed_logins = 0
+    user.locked_until = None
+    token = secrets.token_urlsafe(32)
+    db.add(LoginSession(
+        user_id=user.id, token_hash=hashlib.sha256(token.encode()).hexdigest(),
+        expires_at=now + timedelta(hours=8),
+    ))
+    db.commit()
+    return {"access_token": token, "token_type": "bearer", "expires_in": 28800,
+            "user": _public_user(user)}
+
+
+@app.get("/auth/me")
+def current_user(request: Request, db: Session = Depends(get_db)) -> dict:
+    if not auth_enabled():
+        raise HTTPException(status_code=404, detail="Password login not enabled.")
+    user = db.get(AuthUser, _principal(request))
+    if not user:
+        raise HTTPException(status_code=401, detail="Session expired.")
+    return _public_user(user)
+
+
+@app.post("/auth/logout")
+def logout(request: Request, db: Session = Depends(get_db)) -> dict:
+    if not auth_enabled():
+        raise HTTPException(status_code=404, detail="Password login not enabled.")
+    session = db.get(LoginSession, request.state.session_id)
+    if session:
+        db.delete(session)
+        db.commit()
+    return {"message": "Signed out."}
+
+
+@app.post("/auth/change-password")
+def change_password(payload: PasswordChange, request: Request, db: Session = Depends(get_db)) -> dict:
+    if not auth_enabled():
+        raise HTTPException(status_code=404, detail="Password login not enabled.")
+    user = db.get(AuthUser, _principal(request))
+    try:
+        _hasher.verify(user.password_hash, payload.current_password)
+    except VerificationError:
+        raise HTTPException(status_code=401, detail="Incorrect current password.")
+    user.password_hash = _hasher.hash(payload.new_password)
+    _revoke_user_sessions(db, user.id)
+    db.commit()
+    return {"message": "Password changed. Please sign in again."}
+
+
+@app.get("/admin/users")
+def list_users(request: Request, db: Session = Depends(get_db)) -> list[dict]:
+    _require_admin(request)
+    return [_public_user(user) for user in db.query(AuthUser).order_by(AuthUser.id).all()]
+
+
+@app.post("/admin/users", status_code=201)
+def create_user(payload: NewUser, request: Request, db: Session = Depends(get_db)) -> dict:
+    _require_admin(request)
+    if payload.role not in ("member", "admin"):
+        raise HTTPException(status_code=422, detail="Role must be member or admin.")
+    if len(payload.password) < 12:
+        raise HTTPException(status_code=422, detail="Password requires at least 12 characters.")
+    email = _normalize_email(payload.email)
+    if db.query(AuthUser).filter(AuthUser.email == email).first():
+        raise HTTPException(status_code=409, detail="Account already exists.")
+    user = AuthUser(email=email, password_hash=_hasher.hash(payload.password), role=payload.role)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return _public_user(user)
+
+
+@app.post("/admin/users/{user_id}/reset-password")
+def reset_account_password(
+    user_id: int, payload: AdminPasswordReset, request: Request, db: Session = Depends(get_db)
+) -> dict:
+    _require_admin(request)
+    user = db.get(AuthUser, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    user.password_hash = _hasher.hash(payload.new_password)
+    user.failed_logins = 0
+    user.locked_until = None
+    _revoke_user_sessions(db, user.id)
+    db.commit()
+    return {"message": "Password reset; all user sessions were revoked."}
+
+
 @app.get("/")
 def root() -> dict:
     return {"name": app.title, "version": app.version, "docs": "/docs", "health": "/health"}
@@ -347,18 +599,19 @@ def system_health() -> dict:
         "status": "operational",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "groq_configured": bool(os.getenv("GROQ_API_KEY", "").strip()),
+        "authentication_required": auth_enabled(),
         "embedding_backend": os.getenv("EMBEDDING_BACKEND", "auto"),
     }
 
 
 @app.get("/articles", response_model=None)
-def read_all_articles(db: Session = Depends(get_db)) -> list[DBDocument]:
-    return db.query(DBDocument).order_by(DBDocument.created_at.desc(), DBDocument.id.desc()).all()
+def read_all_articles(request: Request, db: Session = Depends(get_db)) -> list[DBDocument]:
+    return _user_scope(db.query(DBDocument), DBDocument, request).order_by(DBDocument.created_at.desc(), DBDocument.id.desc()).all()
 
 
 @app.get("/documents/{document_id}", response_model=None)
-def read_document(document_id: int, db: Session = Depends(get_db)) -> DBDocument:
-    document = db.query(DBDocument).filter(DBDocument.id == document_id).first()
+def read_document(document_id: int, request: Request, db: Session = Depends(get_db)) -> DBDocument:
+    document = _user_scope(db.query(DBDocument), DBDocument, request).filter(DBDocument.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found.")
     return document
@@ -366,29 +619,30 @@ def read_document(document_id: int, db: Session = Depends(get_db)) -> DBDocument
 
 @app.post("/upload", response_model=UploadResponse, status_code=201)
 def ingest_document(
+    request: Request,
     title: str = Form(..., min_length=1, max_length=255),
     content: str = Form(..., min_length=1),
     category: str = Form("General", max_length=100),
     db: Session = Depends(get_db),
 ) -> UploadResponse:
-    document = _save_document(db, title, content, category)
+    document = _save_document(db, title, content, category, _principal(request))
     return UploadResponse(message="Document saved and indexed.", document_id=document.id, title=document.title, detected_language=document.language)
 
 
 @app.post("/upload-file", response_model=UploadResponse, status_code=201)
-async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)) -> UploadResponse:
+async def upload_file(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)) -> UploadResponse:
     filename = Path(file.filename or "uploaded.txt").name
     raw = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(raw) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MiB limit.")
     content = _parse_document_file(filename, raw)
-    document = _save_document(db, filename, content, "Uploaded")
+    document = _save_document(db, filename, content, "Uploaded", _principal(request))
     return UploadResponse(message="File uploaded, parsed, saved, and indexed.", document_id=document.id, title=document.title, detected_language=document.language)
 
 
 @app.delete("/documents/{document_id}")
-def delete_document(document_id: int, db: Session = Depends(get_db)) -> dict:
-    document = db.query(DBDocument).filter(DBDocument.id == document_id).first()
+def delete_document(document_id: int, request: Request, db: Session = Depends(get_db)) -> dict:
+    document = _user_scope(db.query(DBDocument), DBDocument, request).filter(DBDocument.id == document_id).first()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found.")
     db.delete(document)
@@ -398,11 +652,11 @@ def delete_document(document_id: int, db: Session = Depends(get_db)) -> dict:
 
 
 @app.post("/ask")
-def cross_language_query(payload: QueryRequest, db: Session = Depends(get_db)) -> dict:
+def cross_language_query(payload: QueryRequest, request: Request, db: Session = Depends(get_db)) -> dict:
     question = payload.query.strip()
     if not question:
         raise HTTPException(status_code=422, detail="Question cannot be empty.")
-    documents = db.query(DBDocument).all()
+    documents = _user_scope(db.query(DBDocument), DBDocument, request).all()
     language = _language_name(payload.preferred_language, question)
     if not documents:
         answer = "The knowledge base is empty. Upload a document before asking a question."
@@ -441,6 +695,7 @@ def cross_language_query(payload: QueryRequest, db: Session = Depends(get_db)) -
         question=question, answer=result["answer"], language=result["answer_language"],
         sources_json=json.dumps(result["sources"], ensure_ascii=False),
         answer_mode=result["answer_mode"],
+        owner_id=_principal(request),
     )
     db.add(history)
     db.commit()
@@ -448,21 +703,22 @@ def cross_language_query(payload: QueryRequest, db: Session = Depends(get_db)) -
 
 
 @app.get("/history")
-def read_history(limit: int = 100, db: Session = Depends(get_db)) -> list[dict]:
+def read_history(request: Request, limit: int = 100, db: Session = Depends(get_db)) -> list[dict]:
     bounded_limit = max(1, min(limit, 500))
-    items = db.query(ChatHistory).order_by(ChatHistory.created_at.desc(), ChatHistory.id.desc()).limit(bounded_limit).all()
+    items = _user_scope(db.query(ChatHistory), ChatHistory, request).order_by(ChatHistory.created_at.desc(), ChatHistory.id.desc()).limit(bounded_limit).all()
     return [_serialize_history(item) for item in items]
 
 
 @app.delete("/history")
-def clear_history(db: Session = Depends(get_db)) -> dict:
-    deleted = db.query(ChatHistory).delete(synchronize_session=False)
+def clear_history(request: Request, db: Session = Depends(get_db)) -> dict:
+    deleted = _user_scope(db.query(ChatHistory), ChatHistory, request).delete(synchronize_session=False)
     db.commit()
     return {"message": "Chat history cleared.", "deleted_count": deleted}
 
 
 @app.get("/search")
 def search_documents(
+    request: Request,
     q: str = Query(min_length=1, max_length=4000),
     limit: int = Query(default=10, ge=1, le=50),
     db: Session = Depends(get_db),
@@ -472,7 +728,7 @@ def search_documents(
     if not query:
         raise HTTPException(status_code=422, detail="Search query cannot be empty.")
     vector = embed_text(query)
-    rows = db.query(DBDocument).all()
+    rows = _user_scope(db.query(DBDocument), DBDocument, request).all()
     ranked = sorted(
         ((_cosine_similarity(vector, _document_embedding(item)), item) for item in rows),
         key=lambda pair: pair[0], reverse=True,
@@ -492,25 +748,25 @@ def search_documents(
 
 
 @app.get("/analytics")
-def get_analytics(days: int = Query(default=14, ge=1, le=90), db: Session = Depends(get_db)) -> dict:
+def get_analytics(request: Request, days: int = Query(default=14, ge=1, le=90), db: Session = Depends(get_db)) -> dict:
     """Return real document/question activity for a chart-ready dashboard."""
     now = datetime.now(timezone.utc).date()
     cutoff = datetime.combine(now - timedelta(days=days - 1), datetime.min.time())
-    document_rows = db.query(func.date(DBDocument.created_at), func.count(DBDocument.id)).filter(
-        DBDocument.created_at >= cutoff
-    ).group_by(func.date(DBDocument.created_at)).all()
-    question_rows = db.query(func.date(ChatHistory.created_at), func.count(ChatHistory.id)).filter(
-        ChatHistory.created_at >= cutoff
-    ).group_by(func.date(ChatHistory.created_at)).all()
+    document_rows = _user_scope(
+        db.query(func.date(DBDocument.created_at), func.count(DBDocument.id)), DBDocument, request
+    ).filter(DBDocument.created_at >= cutoff).group_by(func.date(DBDocument.created_at)).all()
+    question_rows = _user_scope(
+        db.query(func.date(ChatHistory.created_at), func.count(ChatHistory.id)), ChatHistory, request
+    ).filter(ChatHistory.created_at >= cutoff).group_by(func.date(ChatHistory.created_at)).all()
     doc_map = {str(day): count for day, count in document_rows}
     question_map = {str(day): count for day, count in question_rows}
     daily = []
     for offset in range(days - 1, -1, -1):
         day = (now - timedelta(days=offset)).isoformat()
         daily.append({"date": day, "documents": doc_map.get(day, 0), "questions": question_map.get(day, 0)})
-    categories = db.query(DBDocument.category, func.count(DBDocument.id)).group_by(DBDocument.category).all()
-    modes = db.query(ChatHistory.answer_mode, func.count(ChatHistory.id)).group_by(ChatHistory.answer_mode).all()
-    languages = db.query(DBDocument.language, func.count(DBDocument.id)).group_by(DBDocument.language).all()
+    categories = _user_scope(db.query(DBDocument.category, func.count(DBDocument.id)), DBDocument, request).group_by(DBDocument.category).all()
+    modes = _user_scope(db.query(ChatHistory.answer_mode, func.count(ChatHistory.id)), ChatHistory, request).group_by(ChatHistory.answer_mode).all()
+    languages = _user_scope(db.query(DBDocument.language, func.count(DBDocument.id)), DBDocument, request).group_by(DBDocument.language).all()
     return {
         "days": days,
         "daily": daily,
@@ -521,10 +777,10 @@ def get_analytics(days: int = Query(default=14, ge=1, le=90), db: Session = Depe
 
 
 @app.get("/stats")
-def get_stats(db: Session = Depends(get_db)) -> dict:
-    document_count = db.query(func.count(DBDocument.id)).scalar() or 0
-    question_count = db.query(func.count(ChatHistory.id)).scalar() or 0
-    rows = db.query(DBDocument.language, func.count(DBDocument.id)).group_by(DBDocument.language).all()
+def get_stats(request: Request, db: Session = Depends(get_db)) -> dict:
+    document_count = _user_scope(db.query(func.count(DBDocument.id)), DBDocument, request).scalar() or 0
+    question_count = _user_scope(db.query(func.count(ChatHistory.id)), ChatHistory, request).scalar() or 0
+    rows = _user_scope(db.query(DBDocument.language, func.count(DBDocument.id)), DBDocument, request).group_by(DBDocument.language).all()
     return {
         "document_count": document_count,
         "question_count": question_count,
