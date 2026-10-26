@@ -33,3 +33,7 @@ frontend/dist/
 .DS_Store
 Thumbs.db
 *.swp
+
+# Backups and production runtime data
+backups/
+.env.production

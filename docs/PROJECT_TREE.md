@@ -55,3 +55,10 @@ Multilingual-Project/
 - GROQ_API_KEY enables generated answers. Without it, answers are extractive and may not be translated.
 - DOCX/PDF import extracts selectable text, not OCR.
 - /analytics uses persisted records; visualizations are **actual counts**, not forecast or sample data.
+
+## Additional production files
+- `frontend/nginx.conf`: static frontend and same-origin /api reverse proxy.
+- `frontend/src/AuthLogin.jsx` and `AccountSecurity.jsx`: account sign-in, password updates and admin user creation.
+- `docker-compose.prod.yml`, `.env.production.example`: containerized private deployment configuration.
+- `scripts/backup-postgres.sh` and `restore-postgres.sh`: operator-run backup and restore scripts.
+- `docs/PRODUCTION_DEPLOYMENT.md`: deployment, HTTPS, secrets, storage and verification.
