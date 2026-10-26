@@ -56,7 +56,10 @@ function App() {
     }
   }, [])
 
-  useEffect(() => { refresh() }, [refresh])
+  useEffect(() => {
+    const task = window.setTimeout(() => { void refresh() }, 0)
+    return () => window.clearTimeout(task)
+  }, [refresh])
 
   async function ask(event) {
     event.preventDefault()
