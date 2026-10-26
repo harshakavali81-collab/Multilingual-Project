@@ -30,3 +30,9 @@ The response includes answer, sources, detected_query_language, answer_language,
 
 ## Error behavior
 Validation errors return HTTP 422. Unsupported file types return 415, oversized uploads return 413, missing documents return 404. Provider errors fall back to a local extractive response rather than returning a traceback or exposing the API key.
+
+## Additions
+- GET /search?q=solar&limit=10 — ranked document previews, title and relevance scores; 1..50 results.
+- GET /analytics?days=14 — day-by-day document uploads and questions (1..90 days), language/category distributions and answer modes.
+- POST /upload-file also accepts CSV and DOCX documents. Text extraction is capped by MAX_DOCUMENT_CHARS (default 200,000); PDF parsing is capped at 250 pages. No OCR for scanned images.
+- Set optional APP_API_KEY on the backend to protect data routes; send X-API-Key on API requests. The /health, /docs and OpenAPI spec endpoints remain public. The default local demo does not require a key.

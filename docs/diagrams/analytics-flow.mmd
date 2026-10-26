@@ -1,0 +1,13 @@
+flowchart LR
+  Files[PDF / DOCX / CSV / TXT / MD] --> Parser[Validated extraction]
+  Parser --> Docs[(documents)]
+  Question[Question] --> Retrieval[Cross-language retrieval / local fallback]
+  Docs --> Retrieval
+  Retrieval --> Answer[Answer with sources]
+  Answer --> Chat[(chat_history)]
+  Docs --> Stats[GET /analytics]
+  Chat --> Stats
+  Stats --> Charts[Live chart dashboard]
+  Charts --> Lang[Language counts]
+  Charts --> Daily[Daily questions]
+  Charts --> Category[Categories / answer modes]

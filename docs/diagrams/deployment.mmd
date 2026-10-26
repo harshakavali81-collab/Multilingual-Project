@@ -1,0 +1,13 @@
+flowchart TB
+  Browser[User Browser] --> UI[React Vite frontend :3000]
+  UI -->|HTTP / API key if configured| API[FastAPI :8000]
+  API --> DB[(PostgreSQL Docker volume)]
+  API -.-> ML[Optional LaBSE model cache]
+  API -.-> Groq[Optional Groq API]
+  subgraph Compose[Docker Compose trusted host]
+    UI
+    API
+    DB
+  end
+  GH[GitHub Actions CI] --> Tests[Pytest / ESLint / Build / Compose validation]
+  note[Public hosting requires HTTPS, auth and backup] -.-> Compose

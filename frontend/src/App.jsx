@@ -14,7 +14,10 @@ const LANGUAGES = [
 async function apiRequest(path, options = {}) {
   let response;
   try {
-    response = await fetch(API_BASE + path, options);
+    const headers = new Headers(options.headers || {});
+    const apiKey = window.sessionStorage.getItem("kb-api-key");
+    if (apiKey) headers.set("X-API-Key", apiKey);
+    response = await fetch(API_BASE + path, { ...options, headers });
   } catch {
     throw new Error("Could not connect to the API at " + API_BASE + ". Start the backend and check VITE_API_BASE_URL.");
   }
@@ -47,6 +50,25 @@ function App() {
   const [articleCategory, setArticleCategory] = useState("General");
   const [articleContent, setArticleContent] = useState("");
   const [selectedFile, setSelectedFile] = useState(null);
+  const [searchText, setSearchText] = useState("");
+  const [apiKey, setApiKey] = useState(() => window.sessionStorage.getItem("kb-api-key") || "");
+  const [analytics, setAnalytics] = useState({ daily: [], language_counts: {}, category_counts: {}, answer_modes: {} });
+  const displayedDocuments = useMemo(() => documents.filter((doc) => {
+    const term = searchText.trim().toLocaleLowerCase();
+    return !term || [doc.title, doc.content, doc.language, doc.category].some((value) => (value || "").toLocaleLowerCase().includes(term));
+  }), [documents, searchText]);
+
+  const languageGraph = useMemo(() => {
+    const entries = Object.entries(analytics.language_counts || {}).sort((a, b) => b[1] - a[1]);
+    const high = Math.max(1, ...entries.map((entry) => entry[1]));
+    return entries.map(([name, count]) => ({ name, count, width: 100 * count / high }));
+  }, [analytics.language_counts]);
+
+  const dailyGraph = useMemo(() => {
+    const entries = analytics.daily || [];
+    const high = Math.max(1, ...entries.map((entry) => entry.questions));
+    return entries.map((entry) => ({ ...entry, height: Math.max(3, 100 * entry.questions / high) }));
+  }, [analytics.daily]);
 
   const languageSummary = useMemo(() => {
     const entries = Object.entries(stats.language_counts || {});
@@ -55,12 +77,13 @@ function App() {
 
   const refreshDashboard = useCallback(async () => {
     try {
-      const [documentData, historyData, statsData, healthData] = await Promise.all([
-        apiRequest("/articles"), apiRequest("/history?limit=100"), apiRequest("/stats"), apiRequest("/health"),
+      const [documentData, historyData, statsData, healthData, analyticsData] = await Promise.all([
+        apiRequest("/articles"), apiRequest("/history?limit=100"), apiRequest("/stats"), apiRequest("/health"), apiRequest("/analytics?days=14"),
       ]);
       setDocuments(documentData);
       setHistory(historyData);
       setStats(statsData);
+      setAnalytics(analyticsData);
       setStatus(healthData.status === "operational" ? "online" : "offline");
       setError("");
     } catch (requestError) {
@@ -187,6 +210,16 @@ function App() {
           <span className="brand-mark" aria-hidden="true">भ</span>
           <span><strong>Bhasha</strong><small>Knowledge Hub</small></span>
         </a>
+        <div className="api-key-control">
+          <label htmlFor="private-key">Private API key (optional)</label>
+          <input id="private-key" type="password" autoComplete="off" value={apiKey}
+            onChange={(event) => {
+              setApiKey(event.target.value);
+              if (event.target.value) window.sessionStorage.setItem("kb-api-key", event.target.value);
+              else window.sessionStorage.removeItem("kb-api-key");
+            }} placeholder="Only if protected" />
+          <button type="button" onClick={() => { void refreshDashboard(); }}>Connect</button>
+        </div>
         <div className={"connection-state " + status} role="status">
           <span className="status-dot" />
           {status === "online" ? "API connected" : status === "checking" ? "Connecting…" : "API offline"}
@@ -215,6 +248,42 @@ function App() {
         <article className="metric-card"><span className="metric-icon violet">▤</span><div><p>Documents</p><strong>{stats.document_count ?? documents.length}</strong></div></article>
         <article className="metric-card"><span className="metric-icon blue">✧</span><div><p>Questions asked</p><strong>{stats.question_count ?? history.length}</strong></div></article>
         <article className="metric-card language-metric"><span className="metric-icon amber">文</span><div><p>Document languages</p><strong className="metric-language-text">{languageSummary}</strong></div></article>
+      </section>
+
+      <section className="panel analytics-panel" aria-labelledby="insights-heading">
+        <div className="panel-heading"><span className="panel-icon blue">▥</span><div>
+          <h2 id="insights-heading">Knowledge analytics</h2><p>Live counts from the database · last 14 days</p>
+        </div></div>
+        <div className="analytics-grid">
+          <div className="analytics-chart">
+            <h3>Documents by language</h3>
+            {!languageGraph.length ? <p className="chart-empty">Upload documents to populate this graph.</p> :
+              <div className="language-bars" role="img" aria-label={languageGraph.map((item) => item.name + ": " + item.count).join(", ")}>
+                {languageGraph.map((item) => <div key={item.name} className="bar-line">
+                  <span>{item.name}</span><div className="bar-track"><div className="bar-fill" style={{ width: item.width + "%" }} /></div><strong>{item.count}</strong>
+                </div>)}
+              </div>}
+          </div>
+          <div className="analytics-chart">
+            <h3>Questions per day</h3>
+            <div className="daily-bars" role="img" aria-label={(analytics.daily || []).map((item) => item.date + ": " + item.questions).join(", ")}>
+              {dailyGraph.map((item) => <div className="daily-bar-column" key={item.date} title={item.date + ": " + item.questions + " questions"}>
+                <div className="daily-bar-fill" style={{ height: item.height + "%" }} />
+                <span>{item.date.slice(5)}</span>
+              </div>)}
+            </div>
+            <p className="chart-footnote">Based on saved question history, including questions without matching documents.</p>
+          </div>
+          <div className="analytics-chart">
+            <h3>Document categories</h3>
+            {Object.keys(analytics.category_counts || {}).length === 0 ? <p className="chart-empty">No categories yet.</p> :
+              <div className="category-chips">{Object.entries(analytics.category_counts).map(([name, count]) =>
+                <span key={name}>{name} <strong>{count}</strong></span>)}</div>}
+            <h3 className="sub-chart-heading">Answer modes</h3>
+            <div className="category-chips">{Object.entries(analytics.answer_modes || {}).map(([name, count]) =>
+              <span key={name}>{name} <strong>{count}</strong></span>)}</div>
+          </div>
+        </div>
       </section>
 
       <section className="workspace-grid">
@@ -252,15 +321,17 @@ function App() {
             </form>
             <div className="upload-divider"><span>OR UPLOAD A FILE</span></div>
             <form className="file-form" onSubmit={uploadFile}>
-              <label className="file-picker" htmlFor="file-upload"><span className="file-picker-icon">↑</span><span><strong>{selectedFile?.name || "Choose a file"}</strong><small>PDF, TXT or Markdown · max 10 MiB</small></span></label>
-              <input id="file-upload" type="file" accept=".pdf,.txt,.md,application/pdf,text/plain,text/markdown" onChange={(event) => setSelectedFile(event.target.files?.[0] || null)} />
+              <label className="file-picker" htmlFor="file-upload"><span className="file-picker-icon">↑</span><span><strong>{selectedFile?.name || "Choose a file"}</strong><small>PDF, DOCX, CSV, TXT or Markdown · max 10 MiB</small></span></label>
+              <input id="file-upload" type="file" accept=".pdf,.docx,.csv,.txt,.md,application/pdf,text/plain,text/markdown,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={(event) => setSelectedFile(event.target.files?.[0] || null)} />
               <button className="primary-button full-width" type="submit" disabled={busy || !selectedFile || status !== "online"}>Upload and index</button>
             </form>
           </section>
 
           <section className="panel documents-panel">
             <div className="panel-heading panel-heading-compact"><span className="panel-icon amber">▤</span><div><h2>Library</h2><p>{documents.length} stored document{documents.length === 1 ? "" : "s"}</p></div></div>
-            {documents.length === 0 ? <div className="empty-state"><span>▤</span><strong>Your library is ready</strong><p>Add your first document to get started.</p></div> : <div className="document-list">{documents.map((document) => <article className="document-item" id={"document-" + document.id} key={document.id}><span className="document-icon">▤</span><div className="document-info"><strong>{document.title}</strong><small>{document.language} · {document.category || "General"}</small><p>{(document.content || "").slice(0, 110)}{(document.content || "").length > 110 ? "…" : ""}</p></div><button className="delete-button" type="button" onClick={() => deleteDocument(document.id)} aria-label={"Delete " + document.title} title="Delete document">×</button></article>)}</div>}
+            <label className="library-filter-label" htmlFor="library-filter">Search documents</label>
+            <input id="library-filter" type="search" value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="Filter by title, content, language…" className="library-filter" />
+            {documents.length === 0 ? <div className="empty-state"><span>▤</span><strong>Your library is ready</strong><p>Add your first document to get started.</p></div> : displayedDocuments.length === 0 ? <p className="chart-empty">No documents match your filter.</p> : <div className="document-list">{displayedDocuments.map((document) => <article className="document-item" id={"document-" + document.id} key={document.id}><span className="document-icon">▤</span><div className="document-info"><strong>{document.title}</strong><small>{document.language} · {document.category || "General"}</small><p>{(document.content || "").slice(0, 110)}{(document.content || "").length > 110 ? "…" : ""}</p></div><button className="delete-button" type="button" onClick={() => deleteDocument(document.id)} aria-label={"Delete " + document.title} title="Delete document">×</button></article>)}</div>}
           </section>
         </div>
       </section>

@@ -61,3 +61,50 @@ def test_clear_history(client):
     result = client.delete("/history")
     assert result.status_code == 200
     assert client.get("/history").json() == []
+
+
+
+def test_csv_and_docx_upload(client):
+    from io import BytesIO
+    from docx import Document
+
+    csv = client.post("/upload-file", files={"file": ("sales.csv", "region,sales\\nHyderabad,42".encode(), "text/csv")})
+    assert csv.status_code == 201
+    assert csv.json()["title"] == "sales.csv"
+    doc = Document()
+    doc.add_paragraph("Kannada and Telugu documentation for onboarding.")
+    payload = BytesIO()
+    doc.save(payload)
+    response = client.post("/upload-file", files={"file": ("guide.docx", payload.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")})
+    assert response.status_code == 201
+    assert "onboarding" in client.get("/documents/" + str(response.json()["document_id"])).json()["content"]
+
+
+def test_analytics_uses_real_database_counts(client):
+    client.post("/upload", data={"title": "Report", "content": "Water is important for life.", "category": "Science"})
+    client.post("/ask", json={"query": "What is water?"})
+    result = client.get("/analytics?days=7")
+    assert result.status_code == 200
+    analytics = result.json()
+    assert len(analytics["daily"]) == 7
+    assert sum(day["documents"] for day in analytics["daily"]) == 1
+    assert sum(day["questions"] for day in analytics["daily"]) == 1
+    assert analytics["category_counts"]["Science"] == 1
+
+
+def test_search_and_limits(client, monkeypatch):
+    client.post("/upload", data={"title": "Solar", "content": "Solar energy converts sunlight into power."})
+    matched = client.get("/search?q=solar")
+    assert matched.status_code == 200
+    assert matched.json()["total"] >= 1
+    assert "content" not in matched.json()["results"][0]
+    monkeypatch.setattr("main.MAX_DOCUMENT_CHARS", 12)
+    assert client.post("/upload", data={"title": "Too long", "content": "This document exceeds the maximum length."}).status_code == 413
+
+
+def test_optional_private_mode(client, monkeypatch):
+    monkeypatch.setenv("APP_API_KEY", "a-local-test-secret")
+    assert client.get("/health").status_code == 200
+    assert client.get("/articles").status_code == 401
+    assert client.get("/articles", headers={"X-API-Key": "wrong"}).status_code == 401
+    assert client.get("/articles", headers={"X-API-Key": "a-local-test-secret"}).status_code == 200

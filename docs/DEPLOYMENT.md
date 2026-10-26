@@ -24,3 +24,6 @@ DATABASE_URL selects SQLite locally or PostgreSQL in Compose. CORS_ORIGINS is a 
 - Add authentication and authorization before exposing document management to the internet.
 - Back up PostgreSQL and test recovery; add migrations, monitoring, rate limits, and request logging.
 - Use a persistent embedding/vector store for larger document collections.
+
+## Deployment limitations and private mode
+This version runs in Docker Compose on a trusted machine and does not provision hosting or HTTPS automatically. **Do not expose the API to the public internet without a TLS reverse proxy, firewall, real identity-based authentication and backups.** In a private single-user demo, set APP_API_KEY and enter it at runtime in the React UI. Configure CORS_ORIGINS to match the actual frontend origin. All graphs are empty until usage data exists. DOCX/CSV ingestion uses python-docx and UTF-8 CSV decoding; scanned PDFs still need OCR.

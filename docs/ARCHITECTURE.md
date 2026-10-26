@@ -20,3 +20,13 @@ The documents table holds title, content, detected language, category, and creat
 ## Security and reliability
 
 Secrets are environment variables and are excluded from commits. Uploads are restricted to plain text, Markdown, and text-based PDFs, with a configurable size cap. CORS origins are configurable. Health checks support local and container validation. For production deployment, add authentication, authorization, rate limiting, migration tooling, observability, backups, and a persistent vector database.
+
+## Additional graphs
+- [Component graph](diagrams/architecture.mmd)
+- [Document-to-answer workflow](diagrams/workflow.mmd)
+- [Entity relationship diagram](diagrams/database-erd.mmd)
+- [Query/response sequence](diagrams/qa-sequence.mmd)
+- [Local deployment graph](diagrams/deployment.mmd)
+- [Live metrics data flow](diagrams/analytics-flow.mmd)
+
+Charts are computed from persisted database rows and updated when the React dashboard refreshes. The optional API key middleware is enforced for all data operations when APP_API_KEY is configured; it does **not** implement user accounts or document access isolation.
