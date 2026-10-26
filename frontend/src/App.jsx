@@ -70,6 +70,8 @@ function App() {
   }, []);
 
   useEffect(() => {
+    // This async request synchronizes initial UI state with the external API.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refreshDashboard();
   }, [refreshDashboard]);
 
