@@ -532,6 +532,8 @@ def logout(request: Request, db: Session = Depends(get_db)) -> dict:
 
 @app.post("/auth/change-password")
 def change_password(payload: PasswordChange, request: Request, db: Session = Depends(get_db)) -> dict:
+    if not auth_enabled():
+        raise HTTPException(status_code=404, detail="Password login not enabled.")
     user = db.get(AuthUser, _principal(request))
     try:
         _hasher.verify(user.password_hash, payload.current_password)
@@ -597,10 +599,10 @@ def read_document(document_id: int, request: Request, db: Session = Depends(get_
 
 @app.post("/upload", response_model=UploadResponse, status_code=201)
 def ingest_document(
+    request: Request,
     title: str = Form(..., min_length=1, max_length=255),
     content: str = Form(..., min_length=1),
     category: str = Form("General", max_length=100),
-    request: Request = None,
     db: Session = Depends(get_db),
 ) -> UploadResponse:
     document = _save_document(db, title, content, category, _principal(request))
@@ -696,9 +698,9 @@ def clear_history(request: Request, db: Session = Depends(get_db)) -> dict:
 
 @app.get("/search")
 def search_documents(
+    request: Request,
     q: str = Query(min_length=1, max_length=4000),
     limit: int = Query(default=10, ge=1, le=50),
-    request: Request = None,
     db: Session = Depends(get_db),
 ) -> dict:
     """Search document metadata and text without exposing entire documents."""

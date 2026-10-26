@@ -16,7 +16,7 @@ import main
 
 
 @pytest.fixture()
-def client(tmp_path):
+def client(tmp_path, monkeypatch):
     database_file = tmp_path / "test.sqlite3"
     test_engine = create_engine(
         "sqlite:///" + str(database_file),
@@ -32,6 +32,7 @@ def client(tmp_path):
         finally:
             db.close()
 
+    monkeypatch.setattr(main, "SessionLocal", test_session)
     main.app.dependency_overrides[main.get_db] = override_get_db
     main._DOCUMENT_EMBEDDINGS.clear()
     main._encoder = None
