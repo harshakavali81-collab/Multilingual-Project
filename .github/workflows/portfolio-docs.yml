@@ -1,0 +1,18 @@
+name: Portfolio documentation
+on:
+  push:
+    paths: ['README.md', 'docs/**', 'scripts/check_portfolio_docs.py', '.github/workflows/portfolio-docs.yml']
+  pull_request:
+    paths: ['README.md', 'docs/**', 'scripts/check_portfolio_docs.py', '.github/workflows/portfolio-docs.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  documentation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python scripts/check_portfolio_docs.py
